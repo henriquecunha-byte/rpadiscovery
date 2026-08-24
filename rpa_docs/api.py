@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from pathlib import Path
 from uuid import uuid4
+import shutil
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, RedirectResponse
@@ -88,6 +89,22 @@ def google_drive_callback(request: Request, state: str):
 @app.get("/api/jobs")
 def jobs():
     return [enrich(item) for item in db.list_jobs()]
+
+
+@app.post("/api/jobs/cleanup")
+def cleanup_jobs():
+    job_ids = db.cleanup_candidates()
+    removed_folders = 0
+    jobs_root = JOBS_DIR.resolve()
+    for job_id in job_ids:
+        workspace = (JOBS_DIR / job_id).resolve()
+        if workspace.parent != jobs_root:
+            raise HTTPException(400, "Pasta de trabalho inválida durante a limpeza.")
+        if workspace.exists():
+            shutil.rmtree(workspace)
+            removed_folders += 1
+    removed_jobs = db.delete_jobs(job_ids)
+    return {"removed_jobs": removed_jobs, "removed_folders": removed_folders}
 
 
 @app.get("/api/jobs/{job_id}")

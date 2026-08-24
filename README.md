@@ -21,6 +21,7 @@ Aplicativo local para transformar gravações de discovery em documentação ope
 - retomada de trabalhos com falha ou cancelados sem repetir o upload;
 - acompanhamento com tempo decorrido, etapa, posição na fila e previsão restante baseada no ritmo atual e no histórico;
 - resumo permanente do guia, público e nível de detalhe de cada pedido;
+- limpeza em lote de trabalhos cancelados ou com falha, incluindo seus arquivos locais, mediante confirmação;
 
 ## Princípios
 

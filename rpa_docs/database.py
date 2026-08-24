@@ -181,3 +181,18 @@ class Database:
             "history_count": len(historical),
             "queue_position": queue_position,
         }
+
+    def cleanup_candidates(self) -> list[str]:
+        with self.connect() as db:
+            return [str(row["id"]) for row in db.execute(
+                "SELECT id FROM jobs WHERE status IN ('FAILED','CANCELLED') ORDER BY created_at"
+            ).fetchall()]
+
+    def delete_jobs(self, job_ids: list[str]) -> int:
+        if not job_ids:
+            return 0
+        placeholders = ",".join("?" for _ in job_ids)
+        with self.connect() as db:
+            db.execute(f"DELETE FROM events WHERE job_id IN ({placeholders})", job_ids)
+            cursor = db.execute(f"DELETE FROM jobs WHERE id IN ({placeholders}) AND status IN ('FAILED','CANCELLED')", job_ids)
+            return int(cursor.rowcount)

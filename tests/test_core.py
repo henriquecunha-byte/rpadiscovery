@@ -46,6 +46,11 @@ class CoreTests(unittest.TestCase):
             retried = database.retry("cancel01")
             self.assertEqual(retried["status"], "QUEUED")
             self.assertIsNone(retried["error"])
+            database.request_cancel("cancel01")
+            candidates = database.cleanup_candidates()
+            self.assertEqual(candidates, ["cancel01"])
+            self.assertEqual(database.delete_jobs(candidates), 1)
+            self.assertIsNone(database.get_job("cancel01"))
 
     def test_time_format(self):
         self.assertEqual(format_time(3661), "01:01:01")
