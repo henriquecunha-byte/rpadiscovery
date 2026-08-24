@@ -14,7 +14,7 @@ from .config import DATABASE, JOBS_DIR, STATIC_DIR
 from .database import Database
 from .orchestrator import Orchestrator
 from .schemas import DriveImport, DriveUpload, JobCreate
-from .pipeline import VIDEO_EXTENSIONS, create_package, synthesize_documentation, write_report
+from .pipeline import VIDEO_EXTENSIONS, create_package, create_preview, synthesize_documentation, write_report
 from .uploads import extract_video_zip, prepare_downloaded_inputs, safe_upload_path
 from .drive import authorization_url, download_files, exchange_code, list_files, status as drive_status, upload_package
 
@@ -44,9 +44,11 @@ async def prevent_stale_local_interface(request: Request, call_next):
 
 def enrich(job: dict) -> dict:
     workspace = JOBS_DIR / job["id"]
+    preview_path = workspace / "preview-processo.mp4"
+    preview_version = preview_path.stat().st_mtime_ns if preview_path.exists() else None
     job["report_url"] = f"/api/jobs/{job['id']}/report" if (workspace / "relatorio.html").exists() else None
-    job["preview_url"] = f"/api/jobs/{job['id']}/preview-processo.mp4" if (workspace / "preview-processo.mp4").exists() else None
-    job["preview_download_url"] = f"/api/jobs/{job['id']}/preview-download" if (workspace / "preview-processo.mp4").exists() else None
+    job["preview_url"] = f"/api/jobs/{job['id']}/preview-processo.mp4?v={preview_version}" if preview_version else None
+    job["preview_download_url"] = f"/api/jobs/{job['id']}/preview-download?v={preview_version}" if preview_version else None
     job["document_url"] = f"/api/jobs/{job['id']}/documentacao-processo.docx" if (workspace / "documentacao-processo.docx").exists() else None
     job["package_url"] = f"/api/jobs/{job['id']}/package" if (workspace / "entrega-completa.zip").exists() else None
     job["output_dir"] = str(workspace.resolve())
@@ -293,22 +295,27 @@ def rebuild_documents(job_id: str):
     try:
         old_report = json.loads(report_path.read_text(encoding="utf-8"))
         transcript = json.loads(transcript_path.read_text(encoding="utf-8"))
-        steps = old_report.get("evidence_steps") or old_report.get("steps") or []
+        raw_analysis_path = workspace / "analise-visual.json"
+        steps = json.loads(raw_analysis_path.read_text(encoding="utf-8")) if raw_analysis_path.exists() else (old_report.get("evidence_steps") or old_report.get("steps") or [])
+        if not raw_analysis_path.exists():
+            raw_analysis_path.write_text(json.dumps(steps, ensure_ascii=False, indent=2), encoding="utf-8")
         result = item.get("result_json") or {}
         video = Path(result.get("video") or item["source_path"])
         documentation = synthesize_documentation(item, steps, transcript, workspace)
+        preview = create_preview(video, steps, workspace, documentation.get("preview_moments", []))
         write_report(item, steps, workspace, video, documentation)
         create_package(workspace)
         result["process_step_count"] = len(documentation.get("process_flow", []))
+        result["preview"] = preview
         result["deliverables"] = [
             "relatorio.html", "documentacao-processo.docx", "procedimento-operacional.md",
-            "requisitos-rpa.md", "matriz-evidencias.csv", "documentacao-processo.json", "preview-processo.mp4",
+            "requisitos-rpa.md", "matriz-evidencias.csv", "documentacao-processo.json", "preview-processo.mp4", "roteiro-cortes.json",
         ]
         db.update(job_id, result_json=result)
-        db.event(job_id, "success", "Documentos estruturados gerados sem reprocessar o vídeo.")
+        db.event(job_id, "success", "Documentos e preview revisados com prioridade para o conteúdo falado, sem repetir a transcrição.")
         return enrich(db.get_job(job_id))
     except Exception as error:
-        raise HTTPException(500, f"Não foi possível gerar os documentos estruturados: {error}") from error
+        raise HTTPException(500, f"Não foi possível revisar os documentos e cortes: {error}") from error
 
 
 @app.get("/api/jobs/{job_id}/{filename}")

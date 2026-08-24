@@ -129,10 +129,14 @@ def analyze(evidence: list[dict], transcript: list[dict], workspace: Path, conte
 
     def analyze_batch(batch: list[dict]) -> list[dict]:
         content = [{"type": "input_text", "text": (
-            "Analise estes frames de uma gravação de discovery de RPA. Identifique mudanças de tela e ações executadas. "
+            "Analise estes frames de uma gravação de discovery de RPA. A fala próxima tem prioridade sobre uma simples mudança visual. "
+            "Identifique telas e ações somente quando contribuírem para entender o processo discutido. Ignore troca de câmera, avatar, "
+            "rosto de participante, saudação, silêncio e mudança visual sem conteúdo operacional. "
             "Retorne JSON puro no formato {\"steps\":[{\"frame_index\":1,\"title\":\"...\",\"action\":\"...\","
             "\"system\":\"...\",\"field_or_control\":\"...\",\"evidence\":\"o que no frame sustenta a descrição\","
             "\"uncertainty\":\"\"}]}. Não invente cliques, campos ou valores invisíveis. Consolide frames sem mudança relevante. "
+            "Não atribua nomes a quem aparece ou fala: esta transcrição não possui identificação confiável de locutor. Use apenas papéis "
+            "operacionais quando forem explicitamente informados no contexto do pedido. "
             f"Nível: {detail}. Contexto informado: {context or 'não informado'}."
         )}]
         for item in batch:
@@ -195,6 +199,7 @@ def fallback_documentation(job: dict, steps: list[dict], warning: str = "") -> d
         "risks_and_controls": [],
         "open_questions": ["Validar com o responsável pelo processo os pontos que não foram explicitados na gravação."],
         "automation_opportunities": [],
+        "preview_moments": [],
         "limitations": limitations,
     }
 
@@ -217,6 +222,7 @@ def normalize_documentation(document, job: dict, steps: list[dict]) -> dict:
         "actors", "systems", "prerequisites", "inputs", "outputs", "business_rules",
         "process_flow", "exceptions", "risks_and_controls", "open_questions",
         "automation_opportunities", "limitations",
+        "preview_moments",
     )
     for key in list_fields:
         if not isinstance(document.get(key), list):
@@ -227,7 +233,7 @@ def normalize_documentation(document, job: dict, steps: list[dict]) -> dict:
 
 
 def synthesize_documentation(job: dict, steps: list[dict], transcript: list[dict], workspace: Path) -> dict:
-    transcript_lines = "\n".join(f"[{format_time(item['start'])}] {item['text']}" for item in transcript)
+    transcript_lines = "\n".join(f"[{format_time(item['start'])}–{format_time(item['end'])}] {item['text']}" for item in transcript)
     observed_steps = [{
         "frame_index": item.get("frame_index"),
         "timecode": item.get("timecode"),
@@ -243,10 +249,19 @@ def synthesize_documentation(job: dict, steps: list[dict], transcript: list[dict
 REGRAS DE CONFIABILIDADE
 - Use somente fatos demonstrados visualmente, explicitamente falados ou informados no contexto do pedido.
 - Não invente regras, responsáveis, integrações, frequências, volumes, credenciais, exceções ou sistemas.
+- O áudio não possui diarização confiável. Não atribua falas ou ações a uma pessoa pelo nome, mesmo que um nome apareça na interface ou seja citado. Use papéis como "área solicitante", "analista" ou "responsável pelo processo" somente quando o papel estiver explícito. Nomes fornecidos diretamente no contexto do pedido podem ser usados.
 - Quando algo necessário não estiver claro, registre em open_questions ou use "Não identificado".
 - Consolide ações de tela em etapas de negócio compreensíveis. A transcrição e os frames são evidências, não a estrutura principal.
 - evidence_refs deve conter somente frame_index existentes nos passos observados.
 - Diferencie o processo atual de oportunidades futuras de automação.
+
+REGRAS PARA O PREVIEW COM CORTES
+- Selecione os trechos principalmente pelo que está sendo falado. O frame serve apenas para confirmar ou ilustrar a explicação.
+- Inclua explicações de processo, regras, decisões, exceções, entradas, saídas, demonstrações relevantes e alinhamentos que mudem o entendimento do trabalho.
+- Exclua saudações, apresentação de participantes, troca de câmera, espera, silêncio, problemas de compartilhamento, conversas paralelas, repetição e comentários sem relação direta com o pedido.
+- Cada momento deve começar pouco antes da frase relevante e terminar depois que a ideia for concluída, sem cortar no meio da fala.
+- Prefira poucos trechos completos a muitos fragmentos. Para uma reunião, busque aproximadamente 8 a 20 momentos e um total entre 15% e 30% da duração, ajustando quando o conteúdo exigir.
+- start e end devem usar timecodes existentes na transcrição e end deve ser posterior a start.
 
 PEDIDO
 Título: {job.get('title', '')}
@@ -276,6 +291,7 @@ Retorne JSON puro exatamente com esta estrutura:
   "risks_and_controls": [{{"risk": "...", "impact": "...", "control": "..."}}],
   "open_questions": ["..."],
   "automation_opportunities": [{{"opportunity": "...", "benefit": "...", "dependency": "..."}}],
+  "preview_moments": [{{"start": "00:10:05", "end": "00:11:20", "title": "explicação do trecho", "reason": "por que esse conteúdo falado é necessário"}}],
   "limitations": ["..."]
 }}'''
     try:
@@ -299,6 +315,18 @@ def format_time(seconds: float) -> str:
     return f"{value // 3600:02d}:{(value % 3600) // 60:02d}:{value % 60:02d}"
 
 
+def parse_timecode(value) -> float:
+    if isinstance(value, (int, float)):
+        return float(value)
+    parts = str(value or "").strip().split(":")
+    if not parts or any(not part.replace(".", "", 1).isdigit() for part in parts):
+        raise ValueError(f"Timecode inválido: {value}")
+    seconds = 0.0
+    for part in parts:
+        seconds = seconds * 60 + float(part)
+    return seconds
+
+
 def preview_ranges(steps: list[dict], duration: float, before: float = 6.0, after: float = 12.0) -> list[tuple[float, float]]:
     ranges = []
     for step in sorted(steps, key=lambda item: float(item.get("time", 0))):
@@ -313,10 +341,36 @@ def preview_ranges(steps: list[dict], duration: float, before: float = 6.0, afte
     return ranges
 
 
-def create_preview(video: Path, steps: list[dict], workspace: Path) -> dict:
-    ranges = preview_ranges(steps, probe_duration(video))
+def preview_ranges_from_moments(moments: list[dict], duration: float, before: float = 2.0, after: float = 3.0) -> list[tuple[float, float]]:
+    ranges = []
+    for moment in moments or []:
+        if not isinstance(moment, dict):
+            continue
+        try:
+            start = max(0.0, parse_timecode(moment.get("start")) - before)
+            end = min(duration, parse_timecode(moment.get("end")) + after)
+        except (TypeError, ValueError):
+            continue
+        if end - start < 3.0:
+            continue
+        ranges.append((start, end))
+    merged = []
+    for start, end in sorted(ranges):
+        if merged and start <= merged[-1][1] + 2.0:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def create_preview(video: Path, steps: list[dict], workspace: Path, moments: list[dict] | None = None) -> dict:
+    duration = probe_duration(video)
+    spoken_ranges = preview_ranges_from_moments(moments or [], duration)
+    ranges = spoken_ranges or preview_ranges(steps, duration)
     if not ranges:
-        return {"created": False, "duration": 0, "ranges": []}
+        result = {"created": False, "duration": 0, "ranges": [], "selection_basis": "none", "moments": moments or []}
+        (workspace / "roteiro-cortes.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+        return result
     segments_dir = workspace / "preview-segments"
     segments_dir.mkdir(exist_ok=True)
     segments = []
@@ -340,12 +394,16 @@ def create_preview(video: Path, steps: list[dict], workspace: Path) -> dict:
     ], capture_output=True, text=True, check=False)
     if completed.returncode != 0:
         raise RuntimeError(f"Não foi possível finalizar o preview: {completed.stderr[-800:]}")
-    return {
+    result = {
         "created": True,
         "duration": round(sum(end - start for start, end in ranges), 3),
         "ranges": [{"start": round(start, 3), "end": round(end, 3)} for start, end in ranges],
+        "selection_basis": "spoken_content" if spoken_ranges else "visual_evidence_fallback",
+        "moments": moments or [],
         "file": preview.name,
     }
+    (workspace / "roteiro-cortes.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    return result
 
 
 def create_package(workspace: Path):
@@ -353,7 +411,7 @@ def create_package(workspace: Path):
     included = [
         "relatorio.html", "relatorio.json", "documentacao-processo.json",
         "documentacao-processo.docx", "procedimento-operacional.md", "requisitos-rpa.md", "matriz-evidencias.csv",
-        "transcricao.json", "preview-processo.mp4", "transcricao-aviso.txt", "documentacao-aviso.txt",
+        "transcricao.json", "preview-processo.mp4", "roteiro-cortes.json", "transcricao-aviso.txt", "documentacao-aviso.txt",
     ]
     with zipfile.ZipFile(package, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
         for name in included:
@@ -694,20 +752,44 @@ def write_structured_files(job: dict, document: dict, steps: list[dict], workspa
 
 def write_report(job: dict, steps: list[dict], workspace: Path, video: Path, document: dict | None = None):
     document = normalize_documentation(document or fallback_documentation(job, steps), job, steps)
+    referenced_frames = set()
+    for section in (document.get("process_flow", []), document.get("business_rules", [])):
+        for item in section:
+            if isinstance(item, dict):
+                referenced_frames.update(str(ref) for ref in item.get("evidence_refs", []) if ref is not None)
+    relevant_steps = [step for step in steps if str(step.get("frame_index")) in referenced_frames]
+    if not relevant_steps:
+        irrelevant_visual_terms = ("participante", "câmera", "videoconferência", "avatar", "sem mudança", "continuidade da fala")
+        relevant_steps = [step for step in steps if not any(term in f"{step.get('title', '')} {step.get('action', '')}".lower() for term in irrelevant_visual_terms)]
+    sanitized_steps = []
+    for step in relevant_steps:
+        display_step = dict(step)
+        visual_context = f"{step.get('title', '')} {step.get('action', '')} {step.get('system', '')} {step.get('field_or_control', '')}".lower()
+        if any(term in visual_context for term in ("participante", "câmera", "videoconferência", "feed de câmera", "avatar")):
+            display_step.update({
+                "title": "Explicação registrada em áudio",
+                "action": "O trecho foi mantido pelo conteúdo falado associado. A imagem mostra apenas o contexto da reunião, sem ação operacional visível.",
+                "system": "Reunião gravada",
+                "field_or_control": "Nenhum controle operacional visível",
+                "evidence": "Frame usado somente como referência temporal para a explicação falada.",
+                "uncertainty": "A gravação não possui diarização confiável; nenhuma fala é atribuída nominalmente.",
+            })
+        sanitized_steps.append(display_step)
+    relevant_steps = sanitized_steps
     report = {
         "title": job["title"], "source": str(video), "audience": job["audience"],
-        "context": job["process_context"], "documentation": document, "evidence_steps": steps,
+        "context": job["process_context"], "documentation": document, "evidence_steps": relevant_steps,
     }
     serialized = json.dumps(report, ensure_ascii=False, indent=2)
     (workspace / "relatorio.json").write_text(serialized, encoding="utf-8")
     (workspace / "documentacao-processo.json").write_text(serialized, encoding="utf-8")
-    write_structured_files(job, document, steps, workspace)
+    write_structured_files(job, document, relevant_steps, workspace)
     safe = lambda value: escape(str(value or ""))
 
     def list_html(items: list, empty: str = "Não identificado na gravação.") -> str:
         return f"<ul>{''.join(f'<li>{safe(item)}</li>' for item in items)}</ul>" if items else f'<p class="empty">{safe(empty)}</p>'
 
-    evidence_by_ref = {str(step.get("frame_index")): step for step in steps if step.get("frame_index") is not None}
+    evidence_by_ref = {str(step.get("frame_index")): step for step in relevant_steps if step.get("frame_index") is not None}
 
     def evidence_links(refs: list) -> str:
         links = []
@@ -727,8 +809,8 @@ def write_report(job: dict, steps: list[dict], workspace: Path, video: Path, doc
     actors = "".join(f"<li><strong>{safe(item.get('name'))}</strong><span>{safe(item.get('responsibility') or 'Responsabilidade não identificada')}</span></li>" for item in document.get("actors", [])) or '<li class="empty">Não identificados.</li>'
     systems = "".join(f"<li><strong>{safe(item.get('name'))}</strong><span>{safe(item.get('purpose') or 'Finalidade não identificada')}</span></li>" for item in document.get("systems", [])) or '<li class="empty">Não identificados.</li>'
     opportunities = "".join(f'''<article class="opportunity"><h3>{safe(item.get('opportunity'))}</h3><p><b>Benefício:</b> {safe(item.get('benefit') or 'A validar')}</p><p><b>Dependência:</b> {safe(item.get('dependency') or 'A validar')}</p></article>''' for item in document.get("automation_opportunities", [])) or '<p class="empty">Nenhuma oportunidade foi confirmada com os insumos disponíveis.</p>'
-    evidence_cards = "".join(f'''<article class="evidence-card" id="evidence-{safe(step.get('frame_index') or index)}"><img src="evidence/{safe(step['image'])}" alt="Evidência da etapa"><div><span>{safe(step.get('timecode'))} · {safe(step.get('system') or 'Sistema não identificado')}</span><h3>{safe(step.get('title') or 'Etapa observada')}</h3><p>{safe(step.get('action'))}</p><dl><dt>Controle ou campo</dt><dd>{safe(step.get('field_or_control') or 'Não identificado')}</dd><dt>O que comprova</dt><dd>{safe(step.get('evidence'))}</dd></dl><details><summary>Ver fala relacionada</summary><p>{safe(step.get('transcript') or 'Sem fala detectada neste trecho.')}</p></details></div></article>''' for index, step in enumerate(steps, 1))
-    preview = '<section class="preview"><h2>Preview do processo</h2><p>Trechos usados como evidência, preservando o contexto de cada ação.</p><video controls preload="metadata" src="preview-processo.mp4"></video><p><a href="preview-processo.mp4" target="_blank">Abrir preview em nova aba</a> · <a href="preview-processo.mp4" download>Baixar preview</a></p></section>' if (workspace / "preview-processo.mp4").exists() else ""
+    evidence_cards = "".join(f'''<article class="evidence-card" id="evidence-{safe(step.get('frame_index') or index)}"><img src="evidence/{safe(step['image'])}" alt="Evidência da etapa"><div><span>{safe(step.get('timecode'))} · {safe(step.get('system') or 'Sistema não identificado')}</span><h3>{safe(step.get('title') or 'Etapa observada')}</h3><p>{safe(step.get('action'))}</p><dl><dt>Controle ou campo</dt><dd>{safe(step.get('field_or_control') or 'Não identificado')}</dd><dt>O que comprova</dt><dd>{safe(step.get('evidence'))}</dd></dl><details><summary>Ver fala relacionada</summary><p>{safe(step.get('transcript') or 'Sem fala detectada neste trecho.')}</p></details></div></article>''' for index, step in enumerate(relevant_steps, 1))
+    preview = '<section class="preview"><h2>Preview do processo</h2><p>Trechos selecionados principalmente pelo conteúdo falado; os frames confirmam e ilustram cada explicação relevante.</p><video controls preload="metadata" src="preview-processo.mp4"></video><p><a href="preview-processo.mp4" target="_blank">Abrir preview em nova aba</a> · <a href="preview-processo.mp4" download>Baixar preview</a></p></section>' if (workspace / "preview-processo.mp4").exists() else ""
     html = f'''<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>{safe(job['title'])}</title><style>:root{{--navy:#102d46;--teal:#168d8a;--ink:#172b3a;--muted:#61798a}}*{{box-sizing:border-box}}body{{font:15px/1.55 Arial;margin:0;background:#f3f5f7;color:var(--ink)}}header{{padding:46px max(5vw,24px);background:var(--navy);color:white}}header p{{max-width:850px}}main{{max-width:1120px;margin:30px auto;padding:0 20px}}section{{margin:22px 0}}.panel{{background:white;padding:24px;border-radius:14px;box-shadow:0 4px 20px #1231}}.summary{{font-size:18px;max-width:900px}}.deliverables{{display:flex;flex-wrap:wrap;gap:8px;margin-top:20px}}.deliverables a,.preview a,.evidence-ref{{color:var(--teal);font-weight:bold;text-decoration:none}}.deliverables a{{padding:9px 12px;background:#e8f5f4;border-radius:8px}}.preview{{background:var(--navy);color:white;padding:22px;border-radius:14px}}video{{display:block;width:100%;max-height:620px;margin-top:14px;background:#000;border-radius:9px}}.columns{{display:grid;grid-template-columns:1fr 1fr;gap:18px}}.entity-list{{list-style:none;padding:0}}.entity-list li{{display:flex;flex-direction:column;padding:10px 0;border-bottom:1px solid #e1e8ed}}.flow-step{{display:grid;grid-template-columns:48px 1fr;gap:15px;background:white;margin:12px 0;padding:20px;border-radius:12px;border-left:4px solid var(--teal)}}.flow-step>b{{display:grid;place-items:center;width:38px;height:38px;border-radius:50%;background:var(--navy);color:white}}.flow-step footer{{display:flex;flex-wrap:wrap;gap:7px;margin-top:12px}}.evidence-ref{{padding:5px 8px;background:#e8f5f4;border-radius:7px;font-size:12px}}.not-confirmed,.empty{{color:var(--muted);font-style:italic}}table{{width:100%;border-collapse:collapse;background:white}}th,td{{padding:11px;text-align:left;border-bottom:1px solid #dce5eb;vertical-align:top}}th{{background:#eaf0f4}}.rules li{{margin:9px 0}}.opportunities{{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px}}.opportunity{{background:#e8f5f4;padding:16px;border-radius:10px}}.evidence-card{{display:grid;grid-template-columns:42% 1fr;gap:22px;background:white;margin:15px 0;padding:18px;border-radius:14px}}.evidence-card img{{width:100%;border-radius:8px;border:1px solid #ccd4dc}}span,dt{{color:#547086;font-size:12px;font-weight:bold}}h2{{margin-top:0}}h3{{margin:5px 0}}dl{{display:grid;grid-template-columns:150px 1fr;gap:7px 12px}}dd{{margin:0}}details{{margin-top:12px}}@media(max-width:760px){{.columns,.evidence-card{{grid-template-columns:1fr}}.flow-step{{grid-template-columns:38px 1fr}}dl{{grid-template-columns:1fr}}}}</style></head><body><header><small>DOCUMENTAÇÃO ESTRUTURADA PÓS-DISCOVERY DE RPA</small><h1>{safe(job['title'])}</h1><p>Público: {safe(job.get('audience'))} · Nível: {safe(job.get('detail_level'))}</p><nav class="deliverables"><a href="documentacao-processo.docx" download>Documento Word editável</a><a href="procedimento-operacional.md" download>Procedimento operacional</a><a href="requisitos-rpa.md" download>Requisitos para RPA</a><a href="matriz-evidencias.csv" download>Matriz de evidências</a><a href="documentacao-processo.json" download>Dados estruturados</a></nav></header><main><section class="panel"><small>VISÃO GERAL</small><h2>Resumo executivo</h2><p class="summary">{safe(document.get('executive_summary'))}</p><h3>Objetivo</h3><p>{safe(document.get('objective'))}</p></section><section class="columns"><div class="panel"><h2>Escopo incluído</h2>{list_html(document.get('scope', {}).get('in_scope', []))}</div><div class="panel"><h2>Fora do escopo</h2>{list_html(document.get('scope', {}).get('out_of_scope', []))}</div></section><section class="columns"><div class="panel"><h2>Atores e responsabilidades</h2><ul class="entity-list">{actors}</ul></div><div class="panel"><h2>Sistemas envolvidos</h2><ul class="entity-list">{systems}</ul></div></section><section class="panel"><h2>Pré-requisitos</h2>{list_html(document.get('prerequisites', []))}</section><section class="columns"><div class="panel"><h2>Entradas</h2><table><thead><tr><th>Entrada</th><th>Origem</th><th>Obrigatoriedade</th></tr></thead><tbody>{input_rows}</tbody></table></div><div class="panel"><h2>Saídas</h2><table><thead><tr><th>Saída</th><th>Destino</th></tr></thead><tbody>{output_rows}</tbody></table></div></section><section><small>PROCESSO ATUAL</small><h2>Fluxo operacional consolidado</h2>{flow_cards or '<p class="empty">Nenhuma etapa foi identificada.</p>'}</section><section class="panel"><h2>Regras de negócio</h2><ol class="rules">{rules}</ol></section><section class="panel"><h2>Exceções e tratamentos</h2><table><thead><tr><th>Cenário</th><th>Tratamento</th><th>Status</th></tr></thead><tbody>{exceptions}</tbody></table></section><section class="panel"><h2>Riscos e controles</h2><table><thead><tr><th>Risco</th><th>Impacto</th><th>Controle</th></tr></thead><tbody>{risks}</tbody></table></section><section><h2>Oportunidades de automação</h2><div class="opportunities">{opportunities}</div></section><section class="columns"><div class="panel"><h2>Pontos a validar</h2>{list_html(document.get('open_questions', []), 'Nenhum ponto adicional registrado.')}</div><div class="panel"><h2>Limitações desta análise</h2>{list_html(document.get('limitations', []))}</div></section>{preview}<section><small>ANEXO DE COMPROVAÇÃO</small><h2>Matriz visual e falas relacionadas</h2><p>As evidências abaixo sustentam a documentação. Elas não substituem o fluxo consolidado acima.</p>{evidence_cards or '<p>Nenhuma evidência visual foi identificada.</p>'}</section></main></body></html>'''
     (workspace / "relatorio.html").write_text(html, encoding="utf-8")
 
@@ -742,11 +824,12 @@ def process(job: dict, workspace: Path, progress):
     transcript = transcribe(video, workspace)
     progress(60, "Cruzando telas e transcrição")
     steps = analyze(evidence, transcript, workspace, job["process_context"], job["detail_level"])
+    (workspace / "analise-visual.json").write_text(json.dumps(steps, ensure_ascii=False, indent=2), encoding="utf-8")
     progress(72, "Estruturando o processo, regras e requisitos de RPA")
     documentation = synthesize_documentation(job, steps, transcript, workspace)
     progress(80, "Montando o preview com os trechos relevantes")
-    preview = create_preview(video, steps, workspace)
+    preview = create_preview(video, steps, workspace, documentation.get("preview_moments", []))
     progress(92, "Montando a documentação e o pacote completo")
     write_report(job, steps, workspace, video, documentation)
     create_package(workspace)
-    return {"video": str(video), "source_files": [str(item) for item in source_videos], "source_count": len(source_videos), "evidence_count": len(evidence), "transcript_segments": len(transcript), "step_count": len(steps), "process_step_count": len(documentation.get("process_flow", [])), "deliverables": ["relatorio.html", "documentacao-processo.docx", "procedimento-operacional.md", "requisitos-rpa.md", "matriz-evidencias.csv", "documentacao-processo.json", "preview-processo.mp4"], "preview": preview}
+    return {"video": str(video), "source_files": [str(item) for item in source_videos], "source_count": len(source_videos), "evidence_count": len(evidence), "transcript_segments": len(transcript), "step_count": len(steps), "process_step_count": len(documentation.get("process_flow", [])), "deliverables": ["relatorio.html", "documentacao-processo.docx", "procedimento-operacional.md", "requisitos-rpa.md", "matriz-evidencias.csv", "documentacao-processo.json", "preview-processo.mp4", "roteiro-cortes.json"], "preview": preview}

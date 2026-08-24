@@ -7,7 +7,7 @@ from pathlib import Path
 from rpa_docs.database import Database
 from rpa_docs.uploads import extract_video_zip, safe_upload_path
 from rpa_docs.drive import extract_folder_id
-from rpa_docs.pipeline import create_package, create_preview, extract_evidence, format_time, preview_ranges, write_report
+from rpa_docs.pipeline import create_package, create_preview, extract_evidence, format_time, parse_timecode, preview_ranges, preview_ranges_from_moments, write_report
 
 
 class CoreTests(unittest.TestCase):
@@ -66,6 +66,15 @@ class CoreTests(unittest.TestCase):
         steps = [{"time": 10}, {"time": 25}, {"time": 80}]
         self.assertEqual(preview_ranges(steps, 100), [(4.0, 37.0), (74.0, 92.0)])
 
+    def test_spoken_moments_drive_preview_ranges(self):
+        moments = [
+            {"start": "00:00:10", "end": "00:00:20"},
+            {"start": "00:00:22", "end": "00:00:30"},
+            {"start": "inválido", "end": "00:01:00"},
+        ]
+        self.assertEqual(parse_timecode("01:02:03"), 3723)
+        self.assertEqual(preview_ranges_from_moments(moments, 100), [(8.0, 33.0)])
+
     def test_upload_path_preserves_folder_and_blocks_escape(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -94,7 +103,9 @@ class CoreTests(unittest.TestCase):
             subprocess.run(["ffmpeg", "-y", "-f", "lavfi", "-i", "color=c=blue:s=640x360:d=3", "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo", "-shortest", "-c:v", "libx264", "-c:a", "aac", str(video)], capture_output=True, check=True)
             result = create_preview(video, [{"time": 1}], root)
             self.assertTrue(result["created"])
+            self.assertEqual(result["selection_basis"], "visual_evidence_fallback")
             self.assertTrue((root / "preview-processo.mp4").exists())
+            self.assertTrue((root / "roteiro-cortes.json").exists())
             evidence = extract_evidence(video, root / "fast-evidence", interval=1)
             self.assertEqual(len(evidence), 3)
             (root / "relatorio.html").write_text("relatório", encoding="utf-8")
@@ -115,6 +126,7 @@ class CoreTests(unittest.TestCase):
                 self.assertIn("requisitos-rpa.md", delivery.namelist())
                 self.assertIn("matriz-evidencias.csv", delivery.namelist())
                 self.assertIn("documentacao-processo.docx", delivery.namelist())
+                self.assertIn("roteiro-cortes.json", delivery.namelist())
 
 
 if __name__ == "__main__":
