@@ -45,6 +45,7 @@ def enrich(job: dict) -> dict:
     workspace = JOBS_DIR / job["id"]
     job["report_url"] = f"/api/jobs/{job['id']}/report" if (workspace / "relatorio.html").exists() else None
     job["preview_url"] = f"/api/jobs/{job['id']}/preview-processo.mp4" if (workspace / "preview-processo.mp4").exists() else None
+    job["preview_download_url"] = f"/api/jobs/{job['id']}/preview-download" if (workspace / "preview-processo.mp4").exists() else None
     job["package_url"] = f"/api/jobs/{job['id']}/package" if (workspace / "entrega-completa.zip").exists() else None
     job["output_dir"] = str(workspace.resolve())
     job["timing"] = db.timing(job)
@@ -251,7 +252,17 @@ def preview(job_id: str):
     path = JOBS_DIR / job_id / "preview-processo.mp4"
     if not path.exists():
         raise HTTPException(404, "O preview ainda não está pronto.")
-    return FileResponse(path, media_type="video/mp4", filename=path.name)
+    return FileResponse(path, media_type="video/mp4", filename=path.name, content_disposition_type="inline")
+
+
+@app.get("/api/jobs/{job_id}/preview-download")
+def download_preview(job_id: str):
+    if not db.get_job(job_id):
+        raise HTTPException(404, "Trabalho não encontrado")
+    path = JOBS_DIR / job_id / "preview-processo.mp4"
+    if not path.exists():
+        raise HTTPException(404, "O preview ainda não está pronto.")
+    return FileResponse(path, media_type="video/mp4", filename=path.name, content_disposition_type="attachment")
 
 
 @app.get("/api/jobs/{job_id}/package")
