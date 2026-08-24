@@ -308,6 +308,7 @@ Retorne JSON puro exatamente com esta estrutura:
         baseline = fallback_documentation(job, steps)
         for key, value in baseline.items():
             document.setdefault(key, value)
+        (workspace / "documentacao-aviso.txt").unlink(missing_ok=True)
         return normalize_documentation(document, job, steps)
     except Exception as error:
         (workspace / "documentacao-aviso.txt").write_text(f"Síntese estruturada indisponível: {error}", encoding="utf-8")
