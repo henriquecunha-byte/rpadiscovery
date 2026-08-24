@@ -12,7 +12,7 @@ Aplicativo local para transformar gravações de discovery em documentação ope
 - transcrição local otimizada para reuniões com Faster-Whisper;
 - descrição visual baseada somente em evidências observáveis;
 - preview MP4 com os trechos relevantes e cortes conservadores;
-- seleção de cortes orientada primeiro pelo conteúdo falado, usando os frames como confirmação visual e descartando saudações, trocas de câmera e conversas paralelas;
+- seleção contextual dos cortes pela API: todo bloco falado relacionado ao assunto pedido permanece, sem meta artificial de duração; os frames servem como confirmação visual;
 - tratamento de participantes por papel operacional, sem atribuir nomes quando o áudio não possui identificação confiável de locutor;
 - relatório HTML navegável e JSON estruturado por trabalho;
 - documentação orientada ao processo, com objetivo, escopo, atores, sistemas, pré-requisitos, entradas, saídas, regras, exceções, riscos e oportunidades de automação;

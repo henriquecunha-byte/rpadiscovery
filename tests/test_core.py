@@ -73,7 +73,9 @@ class CoreTests(unittest.TestCase):
             {"start": "inválido", "end": "00:01:00"},
         ]
         self.assertEqual(parse_timecode("01:02:03"), 3723)
-        self.assertEqual(preview_ranges_from_moments(moments, 100), [(8.0, 33.0)])
+        self.assertEqual(preview_ranges_from_moments(moments, 100), [(6.0, 36.0)])
+        separated = [{"start": "00:00:10", "end": "00:00:20"}, {"start": "00:00:55", "end": "00:01:05"}]
+        self.assertEqual(preview_ranges_from_moments(separated, 100), [(6.0, 26.0), (51.0, 71.0)])
 
     def test_upload_path_preserves_folder_and_blocks_escape(self):
         with tempfile.TemporaryDirectory() as temporary:

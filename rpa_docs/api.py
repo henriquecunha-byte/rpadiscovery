@@ -312,7 +312,7 @@ def rebuild_documents(job_id: str):
             "requisitos-rpa.md", "matriz-evidencias.csv", "documentacao-processo.json", "preview-processo.mp4", "roteiro-cortes.json",
         ]
         db.update(job_id, result_json=result)
-        db.event(job_id, "success", "Documentos e preview revisados com prioridade para o conteúdo falado, sem repetir a transcrição.")
+        db.event(job_id, "success", "Documentos e preview revisados por relevância contextual do assunto, sem repetir a transcrição.")
         return enrich(db.get_job(job_id))
     except Exception as error:
         raise HTTPException(500, f"Não foi possível revisar os documentos e cortes: {error}") from error

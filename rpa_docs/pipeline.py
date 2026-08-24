@@ -256,11 +256,15 @@ REGRAS DE CONFIABILIDADE
 - Diferencie o processo atual de oportunidades futuras de automação.
 
 REGRAS PARA O PREVIEW COM CORTES
-- Selecione os trechos principalmente pelo que está sendo falado. O frame serve apenas para confirmar ou ilustrar a explicação.
-- Inclua explicações de processo, regras, decisões, exceções, entradas, saídas, demonstrações relevantes e alinhamentos que mudem o entendimento do trabalho.
-- Exclua saudações, apresentação de participantes, troca de câmera, espera, silêncio, problemas de compartilhamento, conversas paralelas, repetição e comentários sem relação direta com o pedido.
-- Cada momento deve começar pouco antes da frase relevante e terminar depois que a ideia for concluída, sem cortar no meio da fala.
-- Prefira poucos trechos completos a muitos fragmentos. Para uma reunião, busque aproximadamente 8 a 20 momentos e um total entre 15% e 30% da duração, ajustando quando o conteúdo exigir.
+- O objetivo NÃO é resumir a reunião, criar destaques ou atingir uma duração curta. O objetivo é separar o que pertence ao assunto pedido do que pertence a outros assuntos.
+- Faça uma decisão contextual binária para cada bloco da conversa: "é sobre o assunto definido no Contexto informado?" Se sim, mantenha integralmente. Se não, remova.
+- Considere relevante não apenas a menção literal ao nome do cliente ou projeto, mas também perguntas, respostas, contrapontos, exemplos, demonstrações de tela, decisões, próximos passos e explicações que dependam desse contexto.
+- Preserve o início que apresenta uma dúvida e o final que conclui a resposta. Não retire falas intermediárias só porque não repetem o nome do assunto.
+- Quando a conversa permanecer no mesmo assunto, gere um bloco contínuo e amplo. Não fragmente uma discussão relevante em pequenos melhores momentos.
+- O frame serve para confirmar ou ilustrar o que está sendo falado; sozinho, não deve decidir o corte.
+- Exclua apenas blocos claramente dedicados a outro assunto, além de saudações, espera, silêncio, problemas técnicos sem conteúdo e conversas paralelas sem relação com o pedido.
+- Não use quantidade de momentos nem percentual da duração como meta. Se grande parte da reunião for sobre o assunto pedido, grande parte deve permanecer.
+- Cada momento deve começar pouco antes da primeira fala relevante e terminar depois que a última ideia relevante for concluída, sem cortar no meio da fala.
 - start e end devem usar timecodes existentes na transcrição e end deve ser posterior a start.
 
 PEDIDO
@@ -341,7 +345,7 @@ def preview_ranges(steps: list[dict], duration: float, before: float = 6.0, afte
     return ranges
 
 
-def preview_ranges_from_moments(moments: list[dict], duration: float, before: float = 2.0, after: float = 3.0) -> list[tuple[float, float]]:
+def preview_ranges_from_moments(moments: list[dict], duration: float, before: float = 4.0, after: float = 6.0, merge_gap: float = 20.0) -> list[tuple[float, float]]:
     ranges = []
     for moment in moments or []:
         if not isinstance(moment, dict):
@@ -356,7 +360,7 @@ def preview_ranges_from_moments(moments: list[dict], duration: float, before: fl
         ranges.append((start, end))
     merged = []
     for start, end in sorted(ranges):
-        if merged and start <= merged[-1][1] + 2.0:
+        if merged and start <= merged[-1][1] + merge_gap:
             merged[-1] = (merged[-1][0], max(merged[-1][1], end))
         else:
             merged.append((start, end))
@@ -398,7 +402,7 @@ def create_preview(video: Path, steps: list[dict], workspace: Path, moments: lis
         "created": True,
         "duration": round(sum(end - start for start, end in ranges), 3),
         "ranges": [{"start": round(start, 3), "end": round(end, 3)} for start, end in ranges],
-        "selection_basis": "spoken_content" if spoken_ranges else "visual_evidence_fallback",
+        "selection_basis": "contextual_spoken_content" if spoken_ranges else "visual_evidence_fallback",
         "moments": moments or [],
         "file": preview.name,
     }
