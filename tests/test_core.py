@@ -32,6 +32,13 @@ class CoreTests(unittest.TestCase):
             write_report(created, steps, workspace, Path(payload["source_path"]))
             self.assertTrue((workspace / "relatorio.html").exists())
             self.assertTrue((workspace / "relatorio.json").exists())
+            self.assertTrue((workspace / "procedimento-operacional.md").exists())
+            self.assertTrue((workspace / "requisitos-rpa.md").exists())
+            self.assertTrue((workspace / "matriz-evidencias.csv").exists())
+            self.assertTrue((workspace / "documentacao-processo.docx").exists())
+            report = (workspace / "relatorio.html").read_text(encoding="utf-8")
+            self.assertIn("Fluxo operacional consolidado", report)
+            self.assertIn("Regras de negócio", report)
 
     def test_queued_job_can_be_cancelled(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -92,6 +99,10 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(len(evidence), 3)
             (root / "relatorio.html").write_text("relatório", encoding="utf-8")
             (root / "relatorio.json").write_text("{}", encoding="utf-8")
+            (root / "procedimento-operacional.md").write_text("procedimento", encoding="utf-8")
+            (root / "requisitos-rpa.md").write_text("requisitos", encoding="utf-8")
+            (root / "matriz-evidencias.csv").write_text("evidencia", encoding="utf-8")
+            (root / "documentacao-processo.docx").write_bytes(b"docx")
             (root / "transcricao.json").write_text("[]", encoding="utf-8")
             (root / "evidence").mkdir()
             (root / "evidence" / "evidencia-0001.jpg").write_bytes(b"jpg")
@@ -100,6 +111,10 @@ class CoreTests(unittest.TestCase):
             with zipfile.ZipFile(root / "entrega-completa.zip") as delivery:
                 self.assertEqual(delivery.getinfo("preview-processo.mp4").compress_type, zipfile.ZIP_STORED)
                 self.assertEqual(delivery.getinfo("relatorio.json").compress_type, zipfile.ZIP_DEFLATED)
+                self.assertIn("procedimento-operacional.md", delivery.namelist())
+                self.assertIn("requisitos-rpa.md", delivery.namelist())
+                self.assertIn("matriz-evidencias.csv", delivery.namelist())
+                self.assertIn("documentacao-processo.docx", delivery.namelist())
 
 
 if __name__ == "__main__":

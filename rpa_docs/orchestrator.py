@@ -45,7 +45,7 @@ class Orchestrator:
                 if self.db.status(job_id) == "CANCEL_REQUESTED":
                     raise JobCancelled("Cancelado pelo usuário")
                 self.db.update(job_id, status="COMPLETED", stage="Documentação pronta", progress=100, result_json=result)
-                self.db.event(job_id, "success", "Relatório navegável concluído.")
+                self.db.event(job_id, "success", "Documentação estruturada e pacote completo concluídos.")
             except JobCancelled:
                 self.db.update(job_id, status="CANCELLED", stage="Cancelado", error=None)
                 self.db.event(job_id, "warning", "Processamento cancelado. Os arquivos enviados foram preservados.")

@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from pathlib import Path
 from uuid import uuid4
+import json
 import shutil
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
@@ -13,7 +14,7 @@ from .config import DATABASE, JOBS_DIR, STATIC_DIR
 from .database import Database
 from .orchestrator import Orchestrator
 from .schemas import DriveImport, DriveUpload, JobCreate
-from .pipeline import VIDEO_EXTENSIONS
+from .pipeline import VIDEO_EXTENSIONS, create_package, synthesize_documentation, write_report
 from .uploads import extract_video_zip, prepare_downloaded_inputs, safe_upload_path
 from .drive import authorization_url, download_files, exchange_code, list_files, status as drive_status, upload_package
 
@@ -46,6 +47,7 @@ def enrich(job: dict) -> dict:
     job["report_url"] = f"/api/jobs/{job['id']}/report" if (workspace / "relatorio.html").exists() else None
     job["preview_url"] = f"/api/jobs/{job['id']}/preview-processo.mp4" if (workspace / "preview-processo.mp4").exists() else None
     job["preview_download_url"] = f"/api/jobs/{job['id']}/preview-download" if (workspace / "preview-processo.mp4").exists() else None
+    job["document_url"] = f"/api/jobs/{job['id']}/documentacao-processo.docx" if (workspace / "documentacao-processo.docx").exists() else None
     job["package_url"] = f"/api/jobs/{job['id']}/package" if (workspace / "entrega-completa.zip").exists() else None
     job["output_dir"] = str(workspace.resolve())
     job["timing"] = db.timing(job)
@@ -274,6 +276,53 @@ def package(job_id: str):
     if not path.exists():
         raise HTTPException(404, "O pacote ainda não está pronto.")
     return FileResponse(path, media_type="application/zip", filename=f"{job_id}-documentacao-rpa.zip")
+
+
+@app.post("/api/jobs/{job_id}/rebuild-documents")
+def rebuild_documents(job_id: str):
+    item = db.get_job(job_id)
+    if not item:
+        raise HTTPException(404, "Trabalho não encontrado")
+    if item["status"] != "COMPLETED":
+        raise HTTPException(409, "A análise precisa estar concluída para refazer somente os documentos.")
+    workspace = JOBS_DIR / job_id
+    report_path = workspace / "relatorio.json"
+    transcript_path = workspace / "transcricao.json"
+    if not report_path.exists() or not transcript_path.exists():
+        raise HTTPException(409, "Os insumos deste trabalho não estão disponíveis para gerar os novos documentos.")
+    try:
+        old_report = json.loads(report_path.read_text(encoding="utf-8"))
+        transcript = json.loads(transcript_path.read_text(encoding="utf-8"))
+        steps = old_report.get("evidence_steps") or old_report.get("steps") or []
+        result = item.get("result_json") or {}
+        video = Path(result.get("video") or item["source_path"])
+        documentation = synthesize_documentation(item, steps, transcript, workspace)
+        write_report(item, steps, workspace, video, documentation)
+        create_package(workspace)
+        result["process_step_count"] = len(documentation.get("process_flow", []))
+        result["deliverables"] = [
+            "relatorio.html", "documentacao-processo.docx", "procedimento-operacional.md",
+            "requisitos-rpa.md", "matriz-evidencias.csv", "documentacao-processo.json", "preview-processo.mp4",
+        ]
+        db.update(job_id, result_json=result)
+        db.event(job_id, "success", "Documentos estruturados gerados sem reprocessar o vídeo.")
+        return enrich(db.get_job(job_id))
+    except Exception as error:
+        raise HTTPException(500, f"Não foi possível gerar os documentos estruturados: {error}") from error
+
+
+@app.get("/api/jobs/{job_id}/{filename}")
+def deliverable(job_id: str, filename: str):
+    allowed = {
+        "documentacao-processo.docx", "procedimento-operacional.md", "requisitos-rpa.md",
+        "matriz-evidencias.csv", "documentacao-processo.json",
+    }
+    if filename not in allowed or not db.get_job(job_id):
+        raise HTTPException(404, "Entregável não encontrado")
+    path = JOBS_DIR / job_id / filename
+    if not path.exists():
+        raise HTTPException(404, "O entregável ainda não está pronto.")
+    return FileResponse(path, filename=filename, content_disposition_type="attachment")
 
 
 @app.post("/api/jobs/{job_id}/drive")

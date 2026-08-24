@@ -13,6 +13,8 @@ Aplicativo local para transformar gravações de discovery em documentação ope
 - descrição visual baseada somente em evidências observáveis;
 - preview MP4 com os trechos relevantes e cortes conservadores;
 - relatório HTML navegável e JSON estruturado por trabalho;
+- documentação orientada ao processo, com objetivo, escopo, atores, sistemas, pré-requisitos, entradas, saídas, regras, exceções, riscos e oportunidades de automação;
+- documento Word editável, procedimento operacional, requisitos para RPA e matriz de evidências separados da transcrição bruta;
 - pacote ZIP com relatório, preview, prints, transcrição e dados estruturados;
 - conexão opcional com Google Drive por OAuth e envio do pacote para uma pasta compartilhada;
 - orçamento informado e autorização explícita por execução;
