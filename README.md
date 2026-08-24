@@ -8,7 +8,8 @@ Aplicativo local para transformar gravações de discovery em documentação ope
 - upload por arrastar e soltar de um vídeo ou uma pasta inteira;
 - consolidação automática de várias gravações, sem depender de editor externo;
 - captura de evidências visuais com timecode;
-- transcrição local com Faster-Whisper;
+- captura paralela e pontual de evidências com FFmpeg, sem decodificar a gravação inteira;
+- transcrição local otimizada para reuniões com Faster-Whisper;
 - descrição visual baseada somente em evidências observáveis;
 - preview MP4 com os trechos relevantes e cortes conservadores;
 - relatório HTML navegável e JSON estruturado por trabalho;

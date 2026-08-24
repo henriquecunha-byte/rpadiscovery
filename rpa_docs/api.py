@@ -3,7 +3,6 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from pathlib import Path
 from uuid import uuid4
-import zipfile
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, RedirectResponse
@@ -14,6 +13,7 @@ from .database import Database
 from .orchestrator import Orchestrator
 from .schemas import DriveImport, DriveUpload, JobCreate
 from .pipeline import VIDEO_EXTENSIONS
+from .uploads import extract_video_zip, prepare_downloaded_inputs, safe_upload_path
 from .drive import authorization_url, download_files, exchange_code, list_files, status as drive_status, upload_package
 
 
@@ -128,48 +128,6 @@ def create_job(payload: JobCreate):
     if not payload.api_approved:
         raise HTTPException(400, "Autorize a análise visual para iniciar este trabalho.")
     return enrich(db.create_job(uuid4().hex[:12], payload.model_dump()))
-
-
-def safe_upload_path(root: Path, filename: str) -> Path:
-    parts = [part for part in filename.replace("\\", "/").split("/") if part not in {"", "."}]
-    if not parts or any(part == ".." for part in parts):
-        raise HTTPException(400, "Nome de arquivo inválido no upload.")
-    target = (root.joinpath(*parts)).resolve()
-    if root.resolve() not in target.parents:
-        raise HTTPException(400, "Destino de upload inválido.")
-    return target
-
-
-def extract_video_zip(archive_path: Path, input_dir: Path) -> int:
-    count = 0
-    total_size = 0
-    with zipfile.ZipFile(archive_path) as archive:
-        members = archive.infolist()
-        if len(members) > 2000:
-            raise HTTPException(400, "O ZIP contém arquivos demais.")
-        for member in members:
-            if member.is_dir() or Path(member.filename).suffix.lower() not in VIDEO_EXTENSIONS:
-                continue
-            total_size += member.file_size
-            if total_size > 200 * 1024 * 1024 * 1024:
-                raise HTTPException(400, "O conteúdo descompactado excede o limite de 200 GB.")
-            target = safe_upload_path(input_dir / archive_path.stem, member.filename)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            with archive.open(member) as source, target.open("wb") as destination:
-                while chunk := source.read(1024 * 1024):
-                    destination.write(chunk)
-            count += 1
-    return count
-
-
-def prepare_downloaded_inputs(paths: list[Path], input_dir: Path) -> int:
-    count = 0
-    for path in paths:
-        if path.suffix.lower() == ".zip":
-            count += extract_video_zip(path, input_dir)
-        elif path.suffix.lower() in VIDEO_EXTENSIONS:
-            count += 1
-    return count
 
 
 @app.post("/api/jobs/upload", status_code=201)

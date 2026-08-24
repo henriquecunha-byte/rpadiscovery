@@ -5,9 +5,9 @@ import zipfile
 from pathlib import Path
 
 from rpa_docs.database import Database
-from rpa_docs.api import extract_video_zip, safe_upload_path
+from rpa_docs.uploads import extract_video_zip, safe_upload_path
 from rpa_docs.drive import extract_folder_id
-from rpa_docs.pipeline import create_package, create_preview, format_time, preview_ranges, write_report
+from rpa_docs.pipeline import create_package, create_preview, extract_evidence, format_time, preview_ranges, write_report
 
 
 class CoreTests(unittest.TestCase):
@@ -83,6 +83,8 @@ class CoreTests(unittest.TestCase):
             result = create_preview(video, [{"time": 1}], root)
             self.assertTrue(result["created"])
             self.assertTrue((root / "preview-processo.mp4").exists())
+            evidence = extract_evidence(video, root / "fast-evidence", interval=1)
+            self.assertEqual(len(evidence), 3)
             (root / "relatorio.html").write_text("relatório", encoding="utf-8")
             (root / "relatorio.json").write_text("{}", encoding="utf-8")
             (root / "transcricao.json").write_text("[]", encoding="utf-8")

@@ -6,9 +6,9 @@ import json
 import os
 import subprocess
 import zipfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-import cv2
 from openai import OpenAI
 
 from .config import FFMPEG, FFPROBE
@@ -64,31 +64,52 @@ def probe_duration(video: Path) -> float:
 def extract_evidence(video: Path, output: Path, interval: float = 20.0) -> list[dict]:
     duration = probe_duration(video)
     output.mkdir(parents=True, exist_ok=True)
-    cap = cv2.VideoCapture(str(video))
+    timestamps = [index * interval for index in range(max(1, int(duration // interval) + 1)) if index * interval < duration]
+
+    def capture(index_and_time: tuple[int, float]) -> dict | None:
+        index, timestamp = index_and_time
+        filename = f"evidencia-{index:04d}.jpg"
+        completed = subprocess.run([
+            FFMPEG, "-hide_banner", "-loglevel", "error", "-y", "-ss", f"{timestamp:.3f}",
+            "-i", str(video), "-frames:v", "1", "-vf", "scale='min(1280,iw)':-2",
+            "-q:v", "3", "-threads", "1", str(output / filename),
+        ], capture_output=True, text=True, check=False)
+        if completed.returncode != 0 or not (output / filename).exists():
+            return None
+        return {"index": index, "time": round(timestamp, 3), "image": filename}
+
+    workers = max(2, min(6, (os.cpu_count() or 4) // 2))
     evidence = []
-    timestamp = 0.0
-    index = 1
-    while timestamp < duration:
-        cap.set(cv2.CAP_PROP_POS_MSEC, timestamp * 1000)
-        ok, frame = cap.read()
-        if ok:
-            height, width = frame.shape[:2]
-            if width > 1280:
-                frame = cv2.resize(frame, (1280, round(height * 1280 / width)))
-            filename = f"evidencia-{index:04d}.jpg"
-            cv2.imwrite(str(output / filename), frame, [cv2.IMWRITE_JPEG_QUALITY, 82])
-            evidence.append({"index": index, "time": round(timestamp, 3), "image": filename})
-            index += 1
-        timestamp += interval
-    cap.release()
-    return evidence
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="frame") as executor:
+        futures = [executor.submit(capture, item) for item in enumerate(timestamps, 1)]
+        for future in as_completed(futures):
+            item = future.result()
+            if item:
+                evidence.append(item)
+    return sorted(evidence, key=lambda item: item["index"])
 
 
 def transcribe(video: Path, workspace: Path) -> list[dict]:
     try:
         from faster_whisper import WhisperModel
-        model = WhisperModel("small", device="cpu", compute_type="int8")
-        segments, _ = model.transcribe(str(video), language="pt", vad_filter=True)
+        model_name = os.getenv("WHISPER_MODEL", "base")
+        model = WhisperModel(
+            model_name,
+            device="cpu",
+            compute_type="int8",
+            cpu_threads=max(2, (os.cpu_count() or 4) - 2),
+            num_workers=1,
+        )
+        segments, _ = model.transcribe(
+            str(video),
+            language="pt",
+            vad_filter=True,
+            vad_parameters={"min_silence_duration_ms": 500},
+            beam_size=1,
+            best_of=1,
+            condition_on_previous_text=False,
+            word_timestamps=False,
+        )
         result = [{"start": round(item.start, 3), "end": round(item.end, 3), "text": item.text.strip()} for item in segments]
     except Exception as error:
         (workspace / "transcricao-aviso.txt").write_text(f"Transcrição indisponível: {error}", encoding="utf-8")
@@ -105,8 +126,8 @@ def analyze(evidence: list[dict], transcript: list[dict], workspace: Path, conte
     client = OpenAI()
     model = os.getenv("OPENAI_MODEL", "gpt-5.6-luna")
     steps = []
-    for start in range(0, len(evidence), 6):
-        batch = evidence[start:start + 6]
+    for start in range(0, len(evidence), 10):
+        batch = evidence[start:start + 10]
         content = [{"type": "input_text", "text": (
             "Analise estes frames de uma gravação de discovery de RPA. Identifique mudanças de tela e ações executadas. "
             "Retorne JSON puro no formato {\"steps\":[{\"frame_index\":1,\"title\":\"...\",\"action\":\"...\","
