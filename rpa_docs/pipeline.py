@@ -5,7 +5,9 @@ import csv
 from html import escape
 import json
 import os
+import re
 import subprocess
+import unicodedata
 import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -368,16 +370,28 @@ def preview_ranges_from_moments(moments: list[dict], duration: float, before: fl
     return merged
 
 
-def create_preview(video: Path, steps: list[dict], workspace: Path, moments: list[dict] | None = None) -> dict:
+def build_preview_plan(video: Path, steps: list[dict], moments: list[dict] | None = None) -> dict:
     duration = probe_duration(video)
     spoken_ranges = preview_ranges_from_moments(moments or [], duration)
     ranges = spoken_ranges or preview_ranges(steps, duration)
+    return {
+        "created": bool(ranges),
+        "duration": round(sum(end - start for start, end in ranges), 3),
+        "ranges": [{"start": round(start, 3), "end": round(end, 3)} for start, end in ranges],
+        "selection_basis": "contextual_spoken_content" if spoken_ranges else ("visual_evidence_fallback" if ranges else "none"),
+        "moments": moments or [],
+    }
+
+
+def render_preview(video: Path, ranges: list[tuple[float, float]], workspace: Path, output_path: Path, plan_path: Path, selection_basis: str, moments: list[dict] | None = None) -> dict:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    plan_path.parent.mkdir(parents=True, exist_ok=True)
     if not ranges:
-        result = {"created": False, "duration": 0, "ranges": [], "selection_basis": "none", "moments": moments or []}
-        (workspace / "roteiro-cortes.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+        result = {"created": False, "duration": 0, "ranges": [], "selection_basis": selection_basis, "moments": moments or [], "file": None}
+        plan_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
         return result
-    segments_dir = workspace / "preview-segments"
-    segments_dir.mkdir(exist_ok=True)
+    segments_dir = workspace / "preview-segments" / output_path.stem
+    segments_dir.mkdir(parents=True, exist_ok=True)
     segments = []
     for index, (start, end) in enumerate(ranges, 1):
         segment = segments_dir / f"segment-{index:03d}.mp4"
@@ -392,10 +406,9 @@ def create_preview(video: Path, steps: list[dict], workspace: Path, moments: lis
         segments.append(segment)
     concat_list = segments_dir / "concat.txt"
     concat_list.write_text("\n".join(f"file '{item.as_posix()}'" for item in segments), encoding="utf-8")
-    preview = workspace / "preview-processo.mp4"
     completed = subprocess.run([
         FFMPEG, "-y", "-f", "concat", "-safe", "0", "-i", str(concat_list),
-        "-c", "copy", "-movflags", "+faststart", str(preview),
+        "-c", "copy", "-movflags", "+faststart", str(output_path),
     ], capture_output=True, text=True, check=False)
     if completed.returncode != 0:
         raise RuntimeError(f"Não foi possível finalizar o preview: {completed.stderr[-800:]}")
@@ -403,12 +416,71 @@ def create_preview(video: Path, steps: list[dict], workspace: Path, moments: lis
         "created": True,
         "duration": round(sum(end - start for start, end in ranges), 3),
         "ranges": [{"start": round(start, 3), "end": round(end, 3)} for start, end in ranges],
-        "selection_basis": "contextual_spoken_content" if spoken_ranges else "visual_evidence_fallback",
+        "selection_basis": selection_basis,
         "moments": moments or [],
-        "file": preview.name,
+        "file": output_path.relative_to(workspace).as_posix(),
     }
-    (workspace / "roteiro-cortes.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    plan_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     return result
+
+
+def create_preview(video: Path, steps: list[dict], workspace: Path, moments: list[dict] | None = None) -> dict:
+    plan = build_preview_plan(video, steps, moments)
+    ranges = [(item["start"], item["end"]) for item in plan["ranges"]]
+    return render_preview(video, ranges, workspace, workspace / "preview-processo.mp4", workspace / "roteiro-cortes.json", plan["selection_basis"], moments)
+
+
+def preview_slug(video: Path, index: int) -> str:
+    normalized = unicodedata.normalize("NFKD", video.stem).encode("ascii", "ignore").decode("ascii")
+    cleaned = re.sub(r"[^a-zA-Z0-9]+", "-", normalized).strip("-").lower()[:70] or "video"
+    return f"{index:03d}-{cleaned}"
+
+
+def create_job_previews(analysis_video: Path, source_videos: list[Path], steps: list[dict], workspace: Path, moments: list[dict] | None = None) -> tuple[dict, list[dict]]:
+    if len(source_videos) == 1:
+        preview = create_preview(analysis_video, steps, workspace, moments)
+        source_preview = dict(preview)
+        source_preview |= {"index": 1, "source_name": source_videos[0].name, "source_path": str(source_videos[0])}
+        return preview, [source_preview]
+
+    plan = build_preview_plan(analysis_video, steps, moments)
+    global_ranges = [(item["start"], item["end"]) for item in plan["ranges"]]
+    source_previews = []
+    offset = 0.0
+    for index, source in enumerate(source_videos, 1):
+        source_duration = probe_duration(source)
+        source_end = offset + source_duration
+        local_ranges = []
+        for start, end in global_ranges:
+            local_start = max(start, offset)
+            local_end = min(end, source_end)
+            if local_end - local_start >= 3.0:
+                local_ranges.append((local_start - offset, local_end - offset))
+        slug = preview_slug(source, index)
+        source_preview = render_preview(
+            source,
+            local_ranges,
+            workspace,
+            workspace / "previews" / f"{slug}-preview.mp4",
+            workspace / "roteiros" / f"{slug}-cortes.json",
+            plan["selection_basis"],
+            moments,
+        )
+        source_preview |= {
+            "index": index,
+            "source_name": source.name,
+            "source_path": str(source),
+            "source_duration": round(source_duration, 3),
+            "global_offset": round(offset, 3),
+        }
+        source_previews.append(source_preview)
+        offset = source_end
+
+    (workspace / "preview-processo.mp4").unlink(missing_ok=True)
+    plan["created"] = any(item["created"] for item in source_previews)
+    plan["previews"] = source_previews
+    (workspace / "roteiro-cortes.json").write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8")
+    return plan, source_previews
 
 
 def create_package(workspace: Path):
@@ -426,6 +498,11 @@ def create_package(workspace: Path):
                 archive.write(path, arcname=name, compress_type=compression)
         for path in sorted((workspace / "evidence").glob("*.jpg")):
             archive.write(path, arcname=f"evidence/{path.name}", compress_type=zipfile.ZIP_STORED)
+        for folder in ("previews", "roteiros"):
+            for path in sorted((workspace / folder).glob("*")):
+                if path.is_file():
+                    compression = zipfile.ZIP_STORED if path.suffix.lower() == ".mp4" else zipfile.ZIP_DEFLATED
+                    archive.write(path, arcname=f"{folder}/{path.name}", compress_type=compression)
 
 
 def markdown_value(value) -> str:
@@ -755,7 +832,7 @@ def write_structured_files(job: dict, document: dict, steps: list[dict], workspa
             ])
 
 
-def write_report(job: dict, steps: list[dict], workspace: Path, video: Path, document: dict | None = None):
+def write_report(job: dict, steps: list[dict], workspace: Path, video: Path, document: dict | None = None, source_previews: list[dict] | None = None):
     document = normalize_documentation(document or fallback_documentation(job, steps), job, steps)
     referenced_frames = set()
     for section in (document.get("process_flow", []), document.get("business_rules", [])):
@@ -815,7 +892,14 @@ def write_report(job: dict, steps: list[dict], workspace: Path, video: Path, doc
     systems = "".join(f"<li><strong>{safe(item.get('name'))}</strong><span>{safe(item.get('purpose') or 'Finalidade não identificada')}</span></li>" for item in document.get("systems", [])) or '<li class="empty">Não identificados.</li>'
     opportunities = "".join(f'''<article class="opportunity"><h3>{safe(item.get('opportunity'))}</h3><p><b>Benefício:</b> {safe(item.get('benefit') or 'A validar')}</p><p><b>Dependência:</b> {safe(item.get('dependency') or 'A validar')}</p></article>''' for item in document.get("automation_opportunities", [])) or '<p class="empty">Nenhuma oportunidade foi confirmada com os insumos disponíveis.</p>'
     evidence_cards = "".join(f'''<article class="evidence-card" id="evidence-{safe(step.get('frame_index') or index)}"><img src="evidence/{safe(step['image'])}" alt="Evidência da etapa"><div><span>{safe(step.get('timecode'))} · {safe(step.get('system') or 'Sistema não identificado')}</span><h3>{safe(step.get('title') or 'Etapa observada')}</h3><p>{safe(step.get('action'))}</p><dl><dt>Controle ou campo</dt><dd>{safe(step.get('field_or_control') or 'Não identificado')}</dd><dt>O que comprova</dt><dd>{safe(step.get('evidence'))}</dd></dl><details><summary>Ver fala relacionada</summary><p>{safe(step.get('transcript') or 'Sem fala detectada neste trecho.')}</p></details></div></article>''' for index, step in enumerate(relevant_steps, 1))
-    preview = '<section class="preview"><h2>Preview do processo</h2><p>Trechos selecionados principalmente pelo conteúdo falado; os frames confirmam e ilustram cada explicação relevante.</p><video controls preload="metadata" src="preview-processo.mp4"></video><p><a href="preview-processo.mp4" target="_blank">Abrir preview em nova aba</a> · <a href="preview-processo.mp4" download>Baixar preview</a></p></section>' if (workspace / "preview-processo.mp4").exists() else ""
+    preview_items = [item for item in (source_previews or []) if item.get("created") and item.get("file")]
+    if preview_items:
+        preview_cards = "".join(f'''<article><h3>{safe(item.get('source_name') or f"Gravação {index}")}</h3><p>{safe(format_time(item.get('duration', 0)))} de conteúdo relevante</p><video controls preload="metadata" src="{safe(item['file'])}"></video><p><a href="{safe(item['file'])}" target="_blank">Abrir preview</a> · <a href="{safe(item['file'])}" download>Baixar separadamente</a></p></article>''' for index, item in enumerate(preview_items, 1))
+        preview = f'<section class="preview"><h2>Previews separados por arquivo</h2><p>Cada gravação mantém seus próprios cortes, guiados pelo conteúdo falado e pelo contexto informado.</p>{preview_cards}</section>'
+    elif (workspace / "preview-processo.mp4").exists():
+        preview = '<section class="preview"><h2>Preview do processo</h2><p>Trechos selecionados principalmente pelo conteúdo falado; os frames confirmam e ilustram cada explicação relevante.</p><video controls preload="metadata" src="preview-processo.mp4"></video><p><a href="preview-processo.mp4" target="_blank">Abrir preview em nova aba</a> · <a href="preview-processo.mp4" download>Baixar preview</a></p></section>'
+    else:
+        preview = ""
     html = f'''<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>{safe(job['title'])}</title><style>:root{{--navy:#102d46;--teal:#168d8a;--ink:#172b3a;--muted:#61798a}}*{{box-sizing:border-box}}body{{font:15px/1.55 Arial;margin:0;background:#f3f5f7;color:var(--ink)}}header{{padding:46px max(5vw,24px);background:var(--navy);color:white}}header p{{max-width:850px}}main{{max-width:1120px;margin:30px auto;padding:0 20px}}section{{margin:22px 0}}.panel{{background:white;padding:24px;border-radius:14px;box-shadow:0 4px 20px #1231}}.summary{{font-size:18px;max-width:900px}}.deliverables{{display:flex;flex-wrap:wrap;gap:8px;margin-top:20px}}.deliverables a,.preview a,.evidence-ref{{color:var(--teal);font-weight:bold;text-decoration:none}}.deliverables a{{padding:9px 12px;background:#e8f5f4;border-radius:8px}}.preview{{background:var(--navy);color:white;padding:22px;border-radius:14px}}video{{display:block;width:100%;max-height:620px;margin-top:14px;background:#000;border-radius:9px}}.columns{{display:grid;grid-template-columns:1fr 1fr;gap:18px}}.entity-list{{list-style:none;padding:0}}.entity-list li{{display:flex;flex-direction:column;padding:10px 0;border-bottom:1px solid #e1e8ed}}.flow-step{{display:grid;grid-template-columns:48px 1fr;gap:15px;background:white;margin:12px 0;padding:20px;border-radius:12px;border-left:4px solid var(--teal)}}.flow-step>b{{display:grid;place-items:center;width:38px;height:38px;border-radius:50%;background:var(--navy);color:white}}.flow-step footer{{display:flex;flex-wrap:wrap;gap:7px;margin-top:12px}}.evidence-ref{{padding:5px 8px;background:#e8f5f4;border-radius:7px;font-size:12px}}.not-confirmed,.empty{{color:var(--muted);font-style:italic}}table{{width:100%;border-collapse:collapse;background:white}}th,td{{padding:11px;text-align:left;border-bottom:1px solid #dce5eb;vertical-align:top}}th{{background:#eaf0f4}}.rules li{{margin:9px 0}}.opportunities{{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px}}.opportunity{{background:#e8f5f4;padding:16px;border-radius:10px}}.evidence-card{{display:grid;grid-template-columns:42% 1fr;gap:22px;background:white;margin:15px 0;padding:18px;border-radius:14px}}.evidence-card img{{width:100%;border-radius:8px;border:1px solid #ccd4dc}}span,dt{{color:#547086;font-size:12px;font-weight:bold}}h2{{margin-top:0}}h3{{margin:5px 0}}dl{{display:grid;grid-template-columns:150px 1fr;gap:7px 12px}}dd{{margin:0}}details{{margin-top:12px}}@media(max-width:760px){{.columns,.evidence-card{{grid-template-columns:1fr}}.flow-step{{grid-template-columns:38px 1fr}}dl{{grid-template-columns:1fr}}}}</style></head><body><header><small>DOCUMENTAÇÃO ESTRUTURADA PÓS-DISCOVERY DE RPA</small><h1>{safe(job['title'])}</h1><p>Público: {safe(job.get('audience'))} · Nível: {safe(job.get('detail_level'))}</p><nav class="deliverables"><a href="documentacao-processo.docx" download>Documento Word editável</a><a href="procedimento-operacional.md" download>Procedimento operacional</a><a href="requisitos-rpa.md" download>Requisitos para RPA</a><a href="matriz-evidencias.csv" download>Matriz de evidências</a><a href="documentacao-processo.json" download>Dados estruturados</a></nav></header><main><section class="panel"><small>VISÃO GERAL</small><h2>Resumo executivo</h2><p class="summary">{safe(document.get('executive_summary'))}</p><h3>Objetivo</h3><p>{safe(document.get('objective'))}</p></section><section class="columns"><div class="panel"><h2>Escopo incluído</h2>{list_html(document.get('scope', {}).get('in_scope', []))}</div><div class="panel"><h2>Fora do escopo</h2>{list_html(document.get('scope', {}).get('out_of_scope', []))}</div></section><section class="columns"><div class="panel"><h2>Atores e responsabilidades</h2><ul class="entity-list">{actors}</ul></div><div class="panel"><h2>Sistemas envolvidos</h2><ul class="entity-list">{systems}</ul></div></section><section class="panel"><h2>Pré-requisitos</h2>{list_html(document.get('prerequisites', []))}</section><section class="columns"><div class="panel"><h2>Entradas</h2><table><thead><tr><th>Entrada</th><th>Origem</th><th>Obrigatoriedade</th></tr></thead><tbody>{input_rows}</tbody></table></div><div class="panel"><h2>Saídas</h2><table><thead><tr><th>Saída</th><th>Destino</th></tr></thead><tbody>{output_rows}</tbody></table></div></section><section><small>PROCESSO ATUAL</small><h2>Fluxo operacional consolidado</h2>{flow_cards or '<p class="empty">Nenhuma etapa foi identificada.</p>'}</section><section class="panel"><h2>Regras de negócio</h2><ol class="rules">{rules}</ol></section><section class="panel"><h2>Exceções e tratamentos</h2><table><thead><tr><th>Cenário</th><th>Tratamento</th><th>Status</th></tr></thead><tbody>{exceptions}</tbody></table></section><section class="panel"><h2>Riscos e controles</h2><table><thead><tr><th>Risco</th><th>Impacto</th><th>Controle</th></tr></thead><tbody>{risks}</tbody></table></section><section><h2>Oportunidades de automação</h2><div class="opportunities">{opportunities}</div></section><section class="columns"><div class="panel"><h2>Pontos a validar</h2>{list_html(document.get('open_questions', []), 'Nenhum ponto adicional registrado.')}</div><div class="panel"><h2>Limitações desta análise</h2>{list_html(document.get('limitations', []))}</div></section>{preview}<section><small>ANEXO DE COMPROVAÇÃO</small><h2>Matriz visual e falas relacionadas</h2><p>As evidências abaixo sustentam a documentação. Elas não substituem o fluxo consolidado acima.</p>{evidence_cards or '<p>Nenhuma evidência visual foi identificada.</p>'}</section></main></body></html>'''
     (workspace / "relatorio.html").write_text(html, encoding="utf-8")
 
@@ -832,9 +916,9 @@ def process(job: dict, workspace: Path, progress):
     (workspace / "analise-visual.json").write_text(json.dumps(steps, ensure_ascii=False, indent=2), encoding="utf-8")
     progress(72, "Estruturando o processo, regras e requisitos de RPA")
     documentation = synthesize_documentation(job, steps, transcript, workspace)
-    progress(80, "Montando o preview com os trechos relevantes")
-    preview = create_preview(video, steps, workspace, documentation.get("preview_moments", []))
+    progress(80, "Montando previews separados com os trechos relevantes" if len(source_videos) > 1 else "Montando o preview com os trechos relevantes")
+    preview, source_previews = create_job_previews(video, source_videos, steps, workspace, documentation.get("preview_moments", []))
     progress(92, "Montando a documentação e o pacote completo")
-    write_report(job, steps, workspace, video, documentation)
+    write_report(job, steps, workspace, video, documentation, source_previews)
     create_package(workspace)
-    return {"video": str(video), "source_files": [str(item) for item in source_videos], "source_count": len(source_videos), "evidence_count": len(evidence), "transcript_segments": len(transcript), "step_count": len(steps), "process_step_count": len(documentation.get("process_flow", [])), "deliverables": ["relatorio.html", "documentacao-processo.docx", "procedimento-operacional.md", "requisitos-rpa.md", "matriz-evidencias.csv", "documentacao-processo.json", "preview-processo.mp4", "roteiro-cortes.json"], "preview": preview}
+    return {"video": str(video), "source_files": [str(item) for item in source_videos], "source_count": len(source_videos), "evidence_count": len(evidence), "transcript_segments": len(transcript), "step_count": len(steps), "process_step_count": len(documentation.get("process_flow", [])), "deliverables": ["relatorio.html", "documentacao-processo.docx", "procedimento-operacional.md", "requisitos-rpa.md", "matriz-evidencias.csv", "documentacao-processo.json", "previews separados", "roteiro-cortes.json"], "preview": preview, "previews": source_previews}

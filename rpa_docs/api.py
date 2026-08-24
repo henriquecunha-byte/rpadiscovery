@@ -14,7 +14,7 @@ from .config import DATABASE, JOBS_DIR, STATIC_DIR
 from .database import Database
 from .orchestrator import Orchestrator
 from .schemas import DriveImport, DriveUpload, JobCreate
-from .pipeline import VIDEO_EXTENSIONS, create_package, create_preview, synthesize_documentation, write_report
+from .pipeline import VIDEO_EXTENSIONS, create_job_previews, create_package, synthesize_documentation, write_report
 from .uploads import extract_video_zip, prepare_downloaded_inputs, safe_upload_path
 from .drive import authorization_url, download_files, exchange_code, list_files, status as drive_status, upload_package
 
@@ -46,9 +46,45 @@ def enrich(job: dict) -> dict:
     workspace = JOBS_DIR / job["id"]
     preview_path = workspace / "preview-processo.mp4"
     preview_version = preview_path.stat().st_mtime_ns if preview_path.exists() else None
+    result = job.get("result_json") or {}
+    if isinstance(result, str):
+        try:
+            result = json.loads(result)
+        except json.JSONDecodeError:
+            result = {}
+    if not isinstance(result, dict):
+        result = {}
+    preview_items = []
+    for item in result.get("previews") or []:
+        relative = Path(item.get("file") or "")
+        path = workspace / relative
+        if not item.get("created"):
+            preview_items.append(dict(item) | {"preview_url": None, "download_url": None})
+            continue
+        if not relative.name or not path.exists():
+            continue
+        version = path.stat().st_mtime_ns
+        if relative.parent.as_posix() == "previews":
+            url = f"/api/jobs/{job['id']}/previews/{relative.name}?v={version}"
+            download_url = f"/api/jobs/{job['id']}/previews/{relative.name}?download=true&v={version}"
+        else:
+            url = f"/api/jobs/{job['id']}/preview-processo.mp4?v={version}"
+            download_url = f"/api/jobs/{job['id']}/preview-download?v={version}"
+        preview_items.append(dict(item) | {"preview_url": url, "download_url": download_url})
+    if not preview_items and preview_version:
+        preview_items = [{
+            "index": 1,
+            "source_name": Path(result.get("video") or "Gravação").name,
+            "duration": (result.get("preview") or {}).get("duration", 0),
+            "created": True,
+            "preview_url": f"/api/jobs/{job['id']}/preview-processo.mp4?v={preview_version}",
+            "download_url": f"/api/jobs/{job['id']}/preview-download?v={preview_version}",
+        }]
     job["report_url"] = f"/api/jobs/{job['id']}/report" if (workspace / "relatorio.html").exists() else None
-    job["preview_url"] = f"/api/jobs/{job['id']}/preview-processo.mp4?v={preview_version}" if preview_version else None
-    job["preview_download_url"] = f"/api/jobs/{job['id']}/preview-download?v={preview_version}" if preview_version else None
+    job["previews"] = preview_items
+    first_preview = next((item for item in preview_items if item.get("preview_url")), None)
+    job["preview_url"] = first_preview["preview_url"] if first_preview else None
+    job["preview_download_url"] = first_preview["download_url"] if first_preview else None
     job["document_url"] = f"/api/jobs/{job['id']}/documentacao-processo.docx" if (workspace / "documentacao-processo.docx").exists() else None
     job["package_url"] = f"/api/jobs/{job['id']}/package" if (workspace / "entrega-completa.zip").exists() else None
     job["output_dir"] = str(workspace.resolve())
@@ -173,6 +209,12 @@ async def upload_job(
         if suffix not in VIDEO_EXTENSIONS | {".zip"}:
             continue
         target = safe_upload_path(input_dir, upload.filename or f"video-{saved + 1}.mp4")
+        if target.exists():
+            original = target
+            duplicate = 2
+            while target.exists():
+                target = original.with_name(f"{original.stem}-{duplicate}{original.suffix}")
+                duplicate += 1
         target.parent.mkdir(parents=True, exist_ok=True)
         with target.open("wb") as destination:
             while chunk := await upload.read(1024 * 1024):
@@ -269,6 +311,18 @@ def download_preview(job_id: str):
     return FileResponse(path, media_type="video/mp4", filename=path.name, content_disposition_type="attachment")
 
 
+@app.get("/api/jobs/{job_id}/previews/{filename}")
+def separated_preview(job_id: str, filename: str, download: bool = False):
+    if not db.get_job(job_id):
+        raise HTTPException(404, "Trabalho não encontrado")
+    directory = (JOBS_DIR / job_id / "previews").resolve()
+    path = (directory / filename).resolve()
+    if path.parent != directory or path.suffix.lower() != ".mp4" or not path.exists():
+        raise HTTPException(404, "Preview não encontrado")
+    disposition = "attachment" if download else "inline"
+    return FileResponse(path, media_type="video/mp4", filename=path.name, content_disposition_type=disposition)
+
+
 @app.get("/api/jobs/{job_id}/package")
 def package(job_id: str):
     item = db.get_job(job_id)
@@ -300,16 +354,22 @@ def rebuild_documents(job_id: str):
         if not raw_analysis_path.exists():
             raw_analysis_path.write_text(json.dumps(steps, ensure_ascii=False, indent=2), encoding="utf-8")
         result = item.get("result_json") or {}
+        if isinstance(result, str):
+            result = json.loads(result)
+        if not isinstance(result, dict):
+            result = {}
         video = Path(result.get("video") or item["source_path"])
+        source_videos = [Path(path) for path in result.get("source_files") or [video]]
         documentation = synthesize_documentation(item, steps, transcript, workspace)
-        preview = create_preview(video, steps, workspace, documentation.get("preview_moments", []))
-        write_report(item, steps, workspace, video, documentation)
+        preview, source_previews = create_job_previews(video, source_videos, steps, workspace, documentation.get("preview_moments", []))
+        write_report(item, steps, workspace, video, documentation, source_previews)
         create_package(workspace)
         result["process_step_count"] = len(documentation.get("process_flow", []))
         result["preview"] = preview
+        result["previews"] = source_previews
         result["deliverables"] = [
             "relatorio.html", "documentacao-processo.docx", "procedimento-operacional.md",
-            "requisitos-rpa.md", "matriz-evidencias.csv", "documentacao-processo.json", "preview-processo.mp4", "roteiro-cortes.json",
+            "requisitos-rpa.md", "matriz-evidencias.csv", "documentacao-processo.json", "previews separados", "roteiro-cortes.json",
         ]
         db.update(job_id, result_json=result)
         db.event(job_id, "success", "Documentos e preview revisados por relevância contextual do assunto, sem repetir a transcrição.")

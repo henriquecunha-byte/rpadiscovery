@@ -7,7 +7,7 @@ from pathlib import Path
 from rpa_docs.database import Database
 from rpa_docs.uploads import extract_video_zip, safe_upload_path
 from rpa_docs.drive import extract_folder_id
-from rpa_docs.pipeline import create_package, create_preview, extract_evidence, format_time, parse_timecode, preview_ranges, preview_ranges_from_moments, write_report
+from rpa_docs.pipeline import create_job_previews, create_package, create_preview, extract_evidence, format_time, parse_timecode, preview_ranges, preview_ranges_from_moments, write_report
 
 
 class CoreTests(unittest.TestCase):
@@ -129,6 +129,29 @@ class CoreTests(unittest.TestCase):
                 self.assertIn("matriz-evidencias.csv", delivery.namelist())
                 self.assertIn("documentacao-processo.docx", delivery.namelist())
                 self.assertIn("roteiro-cortes.json", delivery.namelist())
+
+    def test_file_stack_creates_separate_previews(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            sources = []
+            for index, color in enumerate(("blue", "green"), 1):
+                source = root / f"reuniao-{index}.mp4"
+                subprocess.run(["ffmpeg", "-y", "-f", "lavfi", "-i", f"color=c={color}:s=320x180:d=3", "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo", "-shortest", "-c:v", "libx264", "-c:a", "aac", str(source)], capture_output=True, check=True)
+                sources.append(source)
+            analysis = root / "consolidado.mp4"
+            subprocess.run(["ffmpeg", "-y", "-f", "lavfi", "-i", "color=c=black:s=320x180:d=6", "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo", "-shortest", "-c:v", "libx264", "-c:a", "aac", str(analysis)], capture_output=True, check=True)
+            preview, previews = create_job_previews(analysis, sources, [], root, [{"start": "00:00:01", "end": "00:00:05"}])
+            self.assertTrue(preview["created"])
+            self.assertEqual(len(previews), 2)
+            self.assertTrue(all(item["created"] for item in previews))
+            self.assertNotEqual(previews[0]["file"], previews[1]["file"])
+            self.assertTrue(all((root / item["file"]).exists() for item in previews))
+            self.assertFalse((root / "preview-processo.mp4").exists())
+            (root / "relatorio.html").write_text("relatório", encoding="utf-8")
+            create_package(root)
+            with zipfile.ZipFile(root / "entrega-completa.zip") as delivery:
+                for item in previews:
+                    self.assertIn(item["file"], delivery.namelist())
 
 
 if __name__ == "__main__":

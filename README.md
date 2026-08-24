@@ -5,7 +5,8 @@ Aplicativo local para transformar gravações de discovery em documentação ope
 ## Entrega da primeira versão
 
 - fila local de trabalhos e histórico em SQLite;
-- upload por arrastar e soltar de um vídeo ou uma pasta inteira;
+- upload por arrastar e soltar de vídeos, pastas inteiras ou ZIPs;
+- pilha visível de arquivos, com adição incremental e remoção individual antes do processamento;
 - consolidação automática de várias gravações, sem depender de editor externo;
 - captura de evidências visuais com timecode;
 - captura paralela e pontual de evidências com FFmpeg, sem decodificar a gravação inteira;
@@ -13,6 +14,7 @@ Aplicativo local para transformar gravações de discovery em documentação ope
 - descrição visual baseada somente em evidências observáveis;
 - preview MP4 com os trechos relevantes e cortes conservadores;
 - seleção contextual dos cortes pela API: todo bloco falado relacionado ao assunto pedido permanece, sem meta artificial de duração; os frames servem como confirmação visual;
+- um preview cortado e um roteiro de cortes para cada vídeo da pilha, disponíveis separadamente na tela e dentro do ZIP final;
 - tratamento de participantes por papel operacional, sem atribuir nomes quando o áudio não possui identificação confiável de locutor;
 - relatório HTML navegável e JSON estruturado por trabalho;
 - documentação orientada ao processo, com objetivo, escopo, atores, sistemas, pré-requisitos, entradas, saídas, regras, exceções, riscos e oportunidades de automação;
