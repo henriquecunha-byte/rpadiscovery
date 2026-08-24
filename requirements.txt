@@ -1,0 +1,11 @@
+fastapi==0.141.1
+uvicorn==0.52.4
+openai==3.3.1
+python-dotenv==1.2.3
+pydantic>=2.0
+python-multipart
+google-api-python-client
+google-auth-httplib2
+google-auth-oauthlib
+faster-whisper
+opencv-python
