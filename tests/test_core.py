@@ -97,6 +97,9 @@ class CoreTests(unittest.TestCase):
             (root / "evidence" / "evidencia-0001.jpg").write_bytes(b"jpg")
             create_package(root)
             self.assertTrue((root / "entrega-completa.zip").exists())
+            with zipfile.ZipFile(root / "entrega-completa.zip") as delivery:
+                self.assertEqual(delivery.getinfo("preview-processo.mp4").compress_type, zipfile.ZIP_STORED)
+                self.assertEqual(delivery.getinfo("relatorio.json").compress_type, zipfile.ZIP_DEFLATED)
 
 
 if __name__ == "__main__":

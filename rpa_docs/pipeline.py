@@ -123,11 +123,10 @@ def nearby_transcript(transcript: list[dict], timestamp: float, radius: float = 
 
 
 def analyze(evidence: list[dict], transcript: list[dict], workspace: Path, context: str, detail: str) -> list[dict]:
-    client = OpenAI()
     model = os.getenv("OPENAI_MODEL", "gpt-5.6-luna")
-    steps = []
-    for start in range(0, len(evidence), 10):
-        batch = evidence[start:start + 10]
+    batches = [evidence[start:start + 10] for start in range(0, len(evidence), 10)]
+
+    def analyze_batch(batch: list[dict]) -> list[dict]:
         content = [{"type": "input_text", "text": (
             "Analise estes frames de uma gravação de discovery de RPA. Identifique mudanças de tela e ações executadas. "
             "Retorne JSON puro no formato {\"steps\":[{\"frame_index\":1,\"title\":\"...\",\"action\":\"...\","
@@ -140,16 +139,26 @@ def analyze(evidence: list[dict], transcript: list[dict], workspace: Path, conte
             encoded = base64.b64encode(path.read_bytes()).decode("ascii")
             content.append({"type": "input_text", "text": f"Frame {item['index']} em {format_time(item['time'])}. Fala próxima: {nearby_transcript(transcript, item['time']) or 'sem fala detectada'}"})
             content.append({"type": "input_image", "image_url": f"data:image/jpeg;base64,{encoded}", "detail": "low"})
+        client = OpenAI()
         response = client.responses.create(model=model, input=[{"role": "user", "content": content}])
         text = response.output_text.strip().removeprefix("```json").removesuffix("```").strip()
         if not text.startswith("{"):
             text = text[text.find("{"):text.rfind("}") + 1]
         payload = json.loads(text)
+        batch_steps = []
         for step in payload.get("steps", []):
             frame = next((item for item in batch if item["index"] == step.get("frame_index")), batch[0])
             step |= {"time": frame["time"], "timecode": format_time(frame["time"]), "image": frame["image"], "transcript": nearby_transcript(transcript, frame["time"])}
-            steps.append(step)
-    return steps
+            batch_steps.append(step)
+        return batch_steps
+
+    steps = []
+    workers = max(1, min(3, len(batches)))
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="vision") as executor:
+        futures = [executor.submit(analyze_batch, batch) for batch in batches]
+        for future in as_completed(futures):
+            steps.extend(future.result())
+    return sorted(steps, key=lambda item: float(item.get("time", 0)))
 
 
 def format_time(seconds: float) -> str:
@@ -182,8 +191,9 @@ def create_preview(video: Path, steps: list[dict], workspace: Path) -> dict:
         segment = segments_dir / f"segment-{index:03d}.mp4"
         completed = subprocess.run([
             FFMPEG, "-y", "-ss", f"{start:.3f}", "-to", f"{end:.3f}", "-i", str(video),
-            "-map", "0:v:0", "-map", "0:a?", "-c:v", "libx264", "-preset", "veryfast",
-            "-crf", "25", "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", str(segment),
+            "-map", "0:v:0", "-map", "0:a?", "-vf", "scale='min(1280,iw)':-2",
+            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "27", "-c:a", "aac",
+            "-b:a", "96k", "-movflags", "+faststart", str(segment),
         ], capture_output=True, text=True, check=False)
         if completed.returncode != 0:
             raise RuntimeError(f"Não foi possível montar o trecho {index} do preview: {completed.stderr[-800:]}")
@@ -212,9 +222,10 @@ def create_package(workspace: Path):
         for name in included:
             path = workspace / name
             if path.exists():
-                archive.write(path, arcname=name)
+                compression = zipfile.ZIP_STORED if path.suffix.lower() == ".mp4" else zipfile.ZIP_DEFLATED
+                archive.write(path, arcname=name, compress_type=compression)
         for path in sorted((workspace / "evidence").glob("*.jpg")):
-            archive.write(path, arcname=f"evidence/{path.name}")
+            archive.write(path, arcname=f"evidence/{path.name}", compress_type=zipfile.ZIP_STORED)
 
 
 def write_report(job: dict, steps: list[dict], workspace: Path, video: Path):
