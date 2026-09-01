@@ -11,6 +11,14 @@ class JobCreate(BaseModel):
     api_budget_usd: float = Field(default=1.0, ge=0.1, le=50.0)
 
 
+class PromptSuggestion(BaseModel):
+    title: str = Field(default="", max_length=120)
+    process_context: str = Field(default="", max_length=8000)
+    audience: str = Field(default="Equipe de RPA", max_length=160)
+    detail_level: str = Field(default="operacional", pattern="^(resumido|operacional|detalhado)$")
+    sources: list[str] = Field(default_factory=list, max_length=100)
+
+
 class DriveUpload(BaseModel):
     folder: str = Field(default="", max_length=1000)
 

@@ -1,0 +1,12 @@
+.prompt-field{margin:14px 0}
+.prompt-head{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.prompt-head label{margin:0}
+.prompt-button{padding:7px 10px;background:#eef9f8;color:#126f6c;border:1px solid #9fd8d4;font-size:11px}
+.prompt-button:hover{background:#dff3f1}
+.prompt-button:disabled{opacity:.6;cursor:wait}
+.prompt-field textarea{margin-top:8px}
+.prompt-hint{display:block;margin-top:7px;font-size:11px;letter-spacing:0;font-weight:500;text-transform:none;color:var(--muted)}
+.prompt-hint.error{color:#b63445;font-size:11px}
+.download.secondary{background:#eef9f8;color:#126f6c;border:1px solid #9fd8d4}
+.download.secondary:hover{background:#dff3f1}
+@media(max-width:520px){.prompt-head{align-items:stretch;flex-direction:column}.prompt-button{width:100%}}

@@ -9,3 +9,4 @@ google-auth-httplib2
 google-auth-oauthlib
 faster-whisper
 python-docx==1.2.0
+reportlab==5.0.1

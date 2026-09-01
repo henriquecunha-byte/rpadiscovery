@@ -13,8 +13,8 @@ from fastapi.staticfiles import StaticFiles
 from .config import DATABASE, JOBS_DIR, STATIC_DIR
 from .database import Database
 from .orchestrator import Orchestrator
-from .schemas import DriveImport, DriveUpload, JobCreate
-from .pipeline import VIDEO_EXTENSIONS, create_job_previews, create_package, synthesize_documentation, write_report
+from .schemas import DriveImport, DriveUpload, JobCreate, PromptSuggestion
+from .pipeline import VIDEO_EXTENSIONS, create_job_previews, create_package, suggest_process_prompt, synthesize_documentation, write_pdf_document, write_report
 from .uploads import extract_video_zip, prepare_downloaded_inputs, safe_upload_path
 from .drive import authorization_url, download_files, exchange_code, list_files, status as drive_status, upload_package
 
@@ -42,18 +42,42 @@ async def prevent_stale_local_interface(request: Request, call_next):
     return response
 
 
-def enrich(job: dict) -> dict:
-    workspace = JOBS_DIR / job["id"]
-    preview_path = workspace / "preview-processo.mp4"
-    preview_version = preview_path.stat().st_mtime_ns if preview_path.exists() else None
+def parsed_result(job: dict) -> dict:
     result = job.get("result_json") or {}
     if isinstance(result, str):
         try:
             result = json.loads(result)
         except json.JSONDecodeError:
             result = {}
-    if not isinstance(result, dict):
-        result = {}
+    return result if isinstance(result, dict) else {}
+
+
+def recording_file(job_id: str, result: dict) -> Path | None:
+    """Gravação analisada do trabalho: a consolidada quando há pilha, a original quando há um arquivo só."""
+    workspace = (JOBS_DIR / job_id).resolve()
+    candidates = []
+    declared = str(result.get("video") or "")
+    if declared:
+        candidates.append(Path(declared))
+        parts = Path(declared).parts
+        if job_id in parts:
+            candidates.append(workspace.joinpath(*parts[parts.index(job_id) + 1:]))
+    candidates.append(workspace / "gravacao-consolidada.mp4")
+    for candidate in candidates:
+        try:
+            path = candidate.resolve()
+        except OSError:
+            continue
+        if workspace in path.parents and path.suffix.lower() in VIDEO_EXTENSIONS and path.exists():
+            return path
+    return None
+
+
+def enrich(job: dict) -> dict:
+    workspace = JOBS_DIR / job["id"]
+    preview_path = workspace / "preview-processo.mp4"
+    preview_version = preview_path.stat().st_mtime_ns if preview_path.exists() else None
+    result = parsed_result(job)
     preview_items = []
     for item in result.get("previews") or []:
         relative = Path(item.get("file") or "")
@@ -86,6 +110,11 @@ def enrich(job: dict) -> dict:
     job["preview_url"] = first_preview["preview_url"] if first_preview else None
     job["preview_download_url"] = first_preview["download_url"] if first_preview else None
     job["document_url"] = f"/api/jobs/{job['id']}/documentacao-processo.docx" if (workspace / "documentacao-processo.docx").exists() else None
+    job["pdf_url"] = f"/api/jobs/{job['id']}/documentacao-processo.pdf" if (workspace / "relatorio.json").exists() else None
+    recording = recording_file(job["id"], result)
+    job["recording_url"] = f"/api/jobs/{job['id']}/recording" if recording else None
+    job["recording_name"] = recording.name if recording else None
+    job["recording_size"] = recording.stat().st_size if recording else None
     job["package_url"] = f"/api/jobs/{job['id']}/package" if (workspace / "entrega-completa.zip").exists() else None
     job["output_dir"] = str(workspace.resolve())
     job["timing"] = db.timing(job)
@@ -125,6 +154,11 @@ def google_drive_callback(request: Request, state: str):
     except Exception as error:
         raise HTTPException(400, str(error)) from error
     return RedirectResponse("/?drive=connected")
+
+
+@app.post("/api/prompt/suggest")
+def suggest_prompt(payload: PromptSuggestion):
+    return suggest_process_prompt(payload.model_dump())
 
 
 @app.get("/api/jobs")
@@ -323,6 +357,38 @@ def separated_preview(job_id: str, filename: str, download: bool = False):
     return FileResponse(path, media_type="video/mp4", filename=path.name, content_disposition_type=disposition)
 
 
+@app.get("/api/jobs/{job_id}/recording")
+def recording(job_id: str):
+    item = db.get_job(job_id)
+    if not item:
+        raise HTTPException(404, "Trabalho não encontrado")
+    path = recording_file(job_id, parsed_result(item))
+    if not path:
+        raise HTTPException(404, "A gravação analisada ainda não está disponível para download.")
+    return FileResponse(path, filename=path.name, content_disposition_type="attachment")
+
+
+@app.get("/api/jobs/{job_id}/documentacao-processo.pdf")
+def documentation_pdf(job_id: str):
+    item = db.get_job(job_id)
+    if not item:
+        raise HTTPException(404, "Trabalho não encontrado")
+    workspace = JOBS_DIR / job_id
+    path = workspace / "documentacao-processo.pdf"
+    if not path.exists():
+        report_path = workspace / "relatorio.json"
+        if not report_path.exists():
+            raise HTTPException(404, "A documentação ainda não está pronta para exportação.")
+        try:
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            generated = write_pdf_document(item, report.get("documentation") or {}, workspace)
+        except Exception as error:
+            raise HTTPException(500, f"Não foi possível exportar a documentação em PDF: {error}") from error
+        if not generated:
+            raise HTTPException(503, "A exportação em PDF depende da biblioteca reportlab. Execute .\\setup.ps1 novamente.")
+    return FileResponse(path, media_type="application/pdf", filename="documentacao-processo.pdf", content_disposition_type="attachment")
+
+
 @app.get("/api/jobs/{job_id}/package")
 def package(job_id: str):
     item = db.get_job(job_id)
@@ -368,7 +434,7 @@ def rebuild_documents(job_id: str):
         result["preview"] = preview
         result["previews"] = source_previews
         result["deliverables"] = [
-            "relatorio.html", "documentacao-processo.docx", "procedimento-operacional.md",
+            "relatorio.html", "documentacao-processo.docx", "documentacao-processo.pdf", "procedimento-operacional.md",
             "requisitos-rpa.md", "matriz-evidencias.csv", "documentacao-processo.json", "previews separados", "roteiro-cortes.json",
         ]
         db.update(job_id, result_json=result)

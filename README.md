@@ -5,6 +5,7 @@ Aplicativo local para transformar gravações de discovery em documentação ope
 ## Entrega da primeira versão
 
 - fila local de trabalhos e histórico em SQLite;
+- prompt de contexto gerado automaticamente a partir do pedido e da pilha de arquivos, já no formato que a ferramenta usa para analisar, documentar e cortar;
 - upload por arrastar e soltar de vídeos, pastas inteiras ou ZIPs;
 - pilha visível de arquivos, com adição incremental e remoção individual antes do processamento;
 - consolidação automática de várias gravações, sem depender de editor externo;
@@ -17,9 +18,11 @@ Aplicativo local para transformar gravações de discovery em documentação ope
 - um preview cortado e um roteiro de cortes para cada vídeo da pilha, disponíveis separadamente na tela e dentro do ZIP final;
 - tratamento de participantes por papel operacional, sem atribuir nomes quando o áudio não possui identificação confiável de locutor;
 - relatório HTML navegável e JSON estruturado por trabalho;
+- matriz de evidências que reproduz o corte em que o assunto é falado, a partir do print e sem sair do relatório;
 - documentação orientada ao processo, com objetivo, escopo, atores, sistemas, pré-requisitos, entradas, saídas, regras, exceções, riscos e oportunidades de automação;
-- documento Word editável, procedimento operacional, requisitos para RPA e matriz de evidências separados da transcrição bruta;
-- pacote ZIP com relatório, preview, prints, transcrição e dados estruturados;
+- documento Word editável, documento PDF, procedimento operacional, requisitos para RPA e matriz de evidências separados da transcrição bruta;
+- download da gravação analisada e exportação da documentação em PDF direto do painel de acompanhamento;
+- pacote ZIP com relatório, preview, prints, transcrição, PDF e dados estruturados;
 - conexão opcional com Google Drive por OAuth e envio do pacote para uma pasta compartilhada;
 - orçamento informado e autorização explícita por execução;
 - isolamento completo entre gravações em `jobs/<id>`.
@@ -35,7 +38,7 @@ Aplicativo local para transformar gravações de discovery em documentação ope
 - Cada descrição aponta para um print e um momento da gravação.
 - A análise deve declarar incerteza e não inferir cliques ou valores invisíveis.
 - A chave fica apenas no arquivo local `.env`, ignorado pelo Git.
-- O JSON intermediário permite exportação futura para Word, PDF ou template Btime.
+- O JSON intermediário sustenta as exportações em Word, PDF e template Btime.
 
 ## Execução
 
@@ -45,6 +48,16 @@ Aplicativo local para transformar gravações de discovery em documentação ope
 ```
 
 O painel abre em `http://127.0.0.1:8770`.
+
+## Prompt automático do discovery
+
+O botão **Gerar prompt automaticamente**, ao lado do contexto, monta o texto que orienta a análise: ele parte do nome do processo, do público, do nível de detalhe, do rascunho já digitado e dos arquivos na pilha. A primeira linha declara o assunto do discovery, porque é ela que decide o que permanece no preview — cada bloco falado é mantido ou descartado conforme pertencer a esse assunto.
+
+Sem `OPENAI_API_KEY` configurada, o botão devolve um prompt base montado localmente com as mesmas regras e avisa que a API não respondeu. O texto sempre pode ser editado antes de criar a documentação.
+
+## Downloads da entrega
+
+Com o trabalho concluído, o painel de acompanhamento oferece o pacote ZIP completo, a **gravação analisada** (a consolidada quando há vários arquivos na pilha) e a **documentação em PDF**. O PDF acompanha as mesmas seções do documento Word e é gerado sob demanda para trabalhos concluídos antes desta versão.
 
 ## Google Drive
 

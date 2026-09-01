@@ -317,6 +317,66 @@ Retorne JSON puro exatamente com esta estrutura:
         return fallback_documentation(job, steps, str(error))
 
 
+def fallback_process_prompt(job: dict) -> str:
+    title = str(job.get("title") or "Processo operacional").strip()
+    audience = str(job.get("audience") or "Equipe de RPA").strip()
+    detail = str(job.get("detail_level") or "operacional").strip()
+    hint = str(job.get("process_context") or "").strip()
+    sources = [str(item).strip() for item in job.get("sources") or [] if str(item).strip()]
+    subject = hint or f"o processo tratado em “{title}”"
+    lines = [
+        f"Assunto do discovery: {subject}.",
+        f"Documente esse processo para {audience}, em nível {detail}, a partir do que for demonstrado em tela e falado na gravação.",
+    ]
+    if sources:
+        listed = ", ".join(sources[:6]) + (" e demais arquivos da pilha" if len(sources) > 6 else "")
+        lines.append(f"Gravações enviadas: {listed}.")
+    lines += [
+        "Mantenha no preview todo bloco falado que pertença a esse assunto, da pergunta inicial até a conclusão da resposta, incluindo contrapontos, exemplos, demonstrações de tela, decisões e próximos passos.",
+        "Descarte apenas os blocos claramente dedicados a outro assunto, além de saudação, espera, silêncio, problema técnico sem conteúdo e conversa paralela.",
+        "Registre sistemas, telas, campos, entradas, saídas, regras, exceções e riscos somente quando estiverem visíveis na tela ou ditos em voz alta; o que ficar implícito deve virar ponto a validar.",
+        "Não atribua falas ou ações a pessoas pelo nome: esta gravação não possui identificação confiável de locutor.",
+    ]
+    return "\n".join(lines)
+
+
+def suggest_process_prompt(job: dict) -> dict:
+    sources = [str(item).strip() for item in job.get("sources") or [] if str(item).strip()]
+    fallback = fallback_process_prompt(job)
+    instruction = f'''Você escreve o campo "Contexto informado pela equipe" de uma ferramenta de documentação pós-discovery de RPA. Produza o texto que a equipe usaria para orientar a análise da gravação que será enviada.
+
+COMO A FERRAMENTA USA ESSE TEXTO
+- Ele acompanha cada lote de frames na análise visual e define o que conta como tela ou ação relevante do processo.
+- Ele guia a síntese estruturada: objetivo, escopo, atores, sistemas, pré-requisitos, entradas, saídas, regras de negócio, fluxo operacional, exceções, riscos, oportunidades de automação e pontos a validar.
+- Ele decide o corte do preview em vídeo: cada bloco falado é mantido ou removido conforme pertencer ou não ao assunto declarado aqui. Não existe meta de duração.
+- A transcrição é local e não possui diarização confiável, então o texto não pode pedir atribuição de falas por nome.
+
+REGRAS DO TEXTO
+- Português do Brasil, texto corrido em linhas curtas, sem título, sem markdown, sem numeração e sem aspas ao redor de tudo.
+- Entre 6 e 10 linhas, cada uma uma orientação objetiva e verificável.
+- A primeira linha declara o assunto do discovery de forma inequívoca, porque é ela que separa o que fica e o que sai do preview.
+- Inclua o que deve ser mantido integralmente, o que deve ser descartado, quais elementos operacionais procurar e como tratar o que não estiver explícito.
+- Não invente cliente, sistema, número, prazo, regra ou responsável que não tenha sido informado abaixo. Quando faltar informação, escreva a orientação de forma genérica em vez de preencher com suposição.
+
+PEDIDO DA EQUIPE
+Título do trabalho: {job.get('title') or 'Não informado'}
+Público: {job.get('audience') or 'Equipe de RPA'}
+Nível de detalhe: {job.get('detail_level') or 'operacional'}
+Rascunho ou assunto já escrito pela equipe: {job.get('process_context') or 'Nada foi escrito ainda'}
+Arquivos na pilha: {', '.join(sources) if sources else 'Nenhum arquivo selecionado ainda'}
+
+Responda somente com o texto do contexto.'''
+    try:
+        client = OpenAI()
+        response = client.responses.create(model=os.getenv("OPENAI_MODEL", "gpt-5.6-luna"), input=instruction)
+        text = response.output_text.strip().removeprefix("```").removesuffix("```").strip()
+        if len(text) < 40:
+            raise ValueError("A sugestão retornada ficou curta demais para orientar a análise.")
+        return {"prompt": text[:8000], "generated": True, "warning": ""}
+    except Exception as error:
+        return {"prompt": fallback, "generated": False, "warning": str(error)}
+
+
 def format_time(seconds: float) -> str:
     value = max(0, round(seconds))
     return f"{value // 3600:02d}:{(value % 3600) // 60:02d}:{value % 60:02d}"
@@ -487,8 +547,8 @@ def create_package(workspace: Path):
     package = workspace / "entrega-completa.zip"
     included = [
         "relatorio.html", "relatorio.json", "documentacao-processo.json",
-        "documentacao-processo.docx", "procedimento-operacional.md", "requisitos-rpa.md", "matriz-evidencias.csv",
-        "transcricao.json", "preview-processo.mp4", "roteiro-cortes.json", "transcricao-aviso.txt", "documentacao-aviso.txt",
+        "documentacao-processo.docx", "documentacao-processo.pdf", "procedimento-operacional.md", "requisitos-rpa.md", "matriz-evidencias.csv",
+        "transcricao.json", "preview-processo.mp4", "roteiro-cortes.json", "transcricao-aviso.txt", "documentacao-aviso.txt", "documentacao-pdf-aviso.txt",
     ]
     with zipfile.ZipFile(package, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
         for name in included:
@@ -741,6 +801,176 @@ def write_docx_document(job: dict, document: dict, workspace: Path):
     word.save(workspace / "documentacao-processo.docx")
 
 
+def write_pdf_document(job: dict, document: dict, workspace: Path) -> Path | None:
+    try:
+        from reportlab.lib import colors
+        from reportlab.lib.pagesizes import LETTER
+        from reportlab.lib.styles import ParagraphStyle
+        from reportlab.lib.units import inch
+        from reportlab.platypus import KeepTogether, PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+    except ImportError as error:
+        (workspace / "documentacao-pdf-aviso.txt").write_text(f"Exportação em PDF indisponível: {error}", encoding="utf-8")
+        return None
+
+    navy = colors.HexColor("#102d46")
+    teal = colors.HexColor("#168d8a")
+    muted = colors.HexColor("#547086")
+    ink = colors.HexColor("#172b3a")
+    path = workspace / "documentacao-processo.pdf"
+    title_text = str(job.get("title") or "Processo")
+
+    base = ParagraphStyle("Corpo", fontName="Helvetica", fontSize=10.5, leading=15, spaceAfter=6, textColor=ink)
+    styles = {
+        "body": base,
+        "kicker": ParagraphStyle("Kicker", parent=base, fontName="Helvetica-Bold", fontSize=9, textColor=teal, spaceAfter=8),
+        "cover": ParagraphStyle("Capa", parent=base, fontName="Helvetica-Bold", fontSize=27, leading=31, textColor=navy, spaceAfter=10),
+        "subtitle": ParagraphStyle("Subtitulo", parent=base, fontSize=10.5, textColor=muted, spaceAfter=22),
+        "lead": ParagraphStyle("Abertura", parent=base, fontSize=13, leading=18, textColor=navy, spaceAfter=18),
+        "note": ParagraphStyle("Nota", parent=base, fontName="Helvetica-Oblique", fontSize=9.5, textColor=muted),
+        "h1": ParagraphStyle("Titulo1", parent=base, fontName="Helvetica-Bold", fontSize=15, leading=19, textColor=navy, spaceBefore=18, spaceAfter=9, keepWithNext=1),
+        "h2": ParagraphStyle("Titulo2", parent=base, fontName="Helvetica-Bold", fontSize=12, leading=16, textColor=navy, spaceBefore=13, spaceAfter=6, keepWithNext=1),
+        "bullet": ParagraphStyle("Marcador", parent=base, leftIndent=16, bulletIndent=4, spaceAfter=4),
+        "evidence": ParagraphStyle("Evidencia", parent=base, fontName="Helvetica-Oblique", fontSize=9, textColor=muted, spaceAfter=10),
+        "th": ParagraphStyle("Cabecalho", parent=base, fontName="Helvetica-Bold", fontSize=9.5, leading=13, textColor=navy, spaceAfter=0),
+        "td": ParagraphStyle("Celula", parent=base, fontSize=9.5, leading=13, spaceAfter=0),
+    }
+
+    def text(value, style="body", label=""):
+        content = escape(str(value or "Não identificado na gravação."))
+        if label:
+            content = f"<b>{escape(label)}</b> {content}"
+        return Paragraph(content, styles[style])
+
+    def bullets(items: list, empty: str = "Não identificado na gravação."):
+        return [Paragraph(escape(str(item)), styles["bullet"], bulletText="•") for item in (items or [empty])]
+
+    def data_table(headers: list[str], rows: list[list], widths: list[float]):
+        data = [[Paragraph(escape(header), styles["th"]) for header in headers]]
+        data += [[Paragraph(escape(str(value or "Não identificado")), styles["td"]) for value in row] for row in rows]
+        table = Table(data, colWidths=[width * inch for width in widths], repeatRows=1, hAlign="LEFT")
+        table.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#e8eef5")),
+            ("LINEBELOW", (0, 0), (-1, -1), 0.5, colors.HexColor("#dce5eb")),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("TOPPADDING", (0, 0), (-1, -1), 5),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+            ("LEFTPADDING", (0, 0), (-1, -1), 7),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 7),
+        ]))
+        return [table, Spacer(1, 10)]
+
+    def decorate(canvas, document_template):
+        canvas.saveState()
+        canvas.setFont("Helvetica-Bold", 8.5)
+        canvas.setFillColor(muted)
+        canvas.drawString(inch, LETTER[1] - 0.72 * inch, "BTIME · DOCUMENTAÇÃO PÓS-DISCOVERY DE RPA")
+        canvas.setFont("Helvetica", 8.5)
+        canvas.drawRightString(LETTER[0] - inch, 0.62 * inch, f"{title_text} · página {canvas.getPageNumber()}")
+        canvas.setStrokeColor(colors.HexColor("#dce5eb"))
+        canvas.line(inch, LETTER[1] - 0.82 * inch, LETTER[0] - inch, LETTER[1] - 0.82 * inch)
+        canvas.restoreState()
+
+    story = [
+        Spacer(1, 48),
+        text("DOCUMENTO DE PROCESSO E REQUISITOS PARA RPA", "kicker"),
+        text(title_text, "cover"),
+        text(f"Público: {job.get('audience') or 'Equipe de RPA'}  |  Nível: {job.get('detail_level') or 'operacional'}", "subtitle"),
+        text(document.get("executive_summary"), "lead"),
+        text("Este documento consolida o processo demonstrado. A transcrição e os prints são evidências de apoio e permanecem separados no pacote.", "note"),
+        PageBreak(),
+        text("1. Objetivo", "h1"),
+        text(document.get("objective")),
+        text("2. Escopo", "h1"),
+        text("Incluído", "h2"),
+        *bullets(document.get("scope", {}).get("in_scope", [])),
+        text("Fora do escopo", "h2"),
+        *bullets(document.get("scope", {}).get("out_of_scope", [])),
+        text("3. Atores e responsabilidades", "h1"),
+        *data_table(
+            ["Ator", "Responsabilidade"],
+            [[item.get("name"), item.get("responsibility")] for item in document.get("actors", [])] or [["Não identificado", "Validar com a área responsável"]],
+            [1.7, 4.8],
+        ),
+        text("4. Sistemas envolvidos", "h1"),
+        *data_table(
+            ["Sistema", "Finalidade no processo"],
+            [[item.get("name"), item.get("purpose")] for item in document.get("systems", [])] or [["Não identificado", "Validar durante o refinamento"]],
+            [1.7, 4.8],
+        ),
+        text("5. Pré-requisitos", "h1"),
+        *bullets(document.get("prerequisites", [])),
+        text("6. Entradas e saídas", "h1"),
+        text("Entradas", "h2"),
+        *data_table(
+            ["Entrada", "Origem", "Obrigatoriedade"],
+            [[item.get("name"), item.get("source"), item.get("required")] for item in document.get("inputs", [])] or [["Não identificado", "A validar", "A validar"]],
+            [2.5, 2.4, 1.6],
+        ),
+        text("Saídas", "h2"),
+        *data_table(
+            ["Saída", "Destino"],
+            [[item.get("name"), item.get("destination")] for item in document.get("outputs", [])] or [["Não identificado", "A validar"]],
+            [3.25, 3.25],
+        ),
+        text("7. Fluxo operacional", "h1"),
+    ]
+
+    for index, item in enumerate(document.get("process_flow", []), 1):
+        refs = ", ".join(str(ref) for ref in item.get("evidence_refs", [])) or "sem referência visual direta"
+        story.append(KeepTogether([
+            text(f"{item.get('sequence') or index}. {item.get('title') or 'Etapa'}", "h2"),
+            text(item.get("description")),
+            text(item.get("actor"), label="Responsável:"),
+            text(item.get("system"), label="Sistema:"),
+            text(item.get("input"), label="Entrada:"),
+            text(item.get("output"), label="Saída:"),
+            *([text(item.get("decision_or_exception"), label="Decisão ou exceção:")] if item.get("decision_or_exception") else []),
+            text(f"Evidências: {refs}", "evidence"),
+        ]))
+
+    story.append(text("8. Regras de negócio", "h1"))
+    story += bullets([item.get("rule") for item in document.get("business_rules", []) if item.get("rule")], "Nenhuma regra foi explicitada na gravação.")
+    story.append(text("9. Exceções e tratamentos", "h1"))
+    for item in document.get("exceptions", []):
+        story.append(KeepTogether([
+            text(item.get("scenario"), label="Cenário:"),
+            text(item.get("handling"), label="Tratamento:"),
+            text(item.get("status"), label="Status:"),
+        ]))
+    if not document.get("exceptions"):
+        story.append(text("Nenhuma exceção foi explicitada na gravação."))
+    story.append(text("10. Riscos e controles", "h1"))
+    for item in document.get("risks_and_controls", []):
+        story.append(KeepTogether([
+            text(item.get("risk"), label="Risco:"),
+            text(item.get("impact"), label="Impacto:"),
+            text(item.get("control"), label="Controle:"),
+        ]))
+    if not document.get("risks_and_controls"):
+        story.append(text("Nenhum risco ou controle foi explicitado na gravação."))
+    story.append(text("11. Oportunidades de automação", "h1"))
+    for item in document.get("automation_opportunities", []):
+        story.append(KeepTogether([
+            text(item.get("opportunity") or "Oportunidade", "h2"),
+            text(item.get("benefit"), label="Benefício:"),
+            text(item.get("dependency"), label="Dependência:"),
+        ]))
+    if not document.get("automation_opportunities"):
+        story.append(text("Nenhuma oportunidade foi confirmada com os insumos disponíveis."))
+    story.append(text("12. Pontos a validar", "h1"))
+    story += bullets(document.get("open_questions", []), "Nenhum ponto adicional registrado.")
+    story.append(text("13. Limitações da análise", "h1"))
+    story += bullets(document.get("limitations", []))
+
+    SimpleDocTemplate(
+        str(path), pagesize=LETTER, title=title_text, author="Btime RPA Docs",
+        subject="Documentação pós-discovery de RPA", leftMargin=inch, rightMargin=inch,
+        topMargin=inch, bottomMargin=inch,
+    ).build(story, onFirstPage=decorate, onLaterPages=decorate)
+    (workspace / "documentacao-pdf-aviso.txt").unlink(missing_ok=True)
+    return path
+
+
 def write_structured_files(job: dict, document: dict, steps: list[dict], workspace: Path):
     def bullets(items: list, empty: str = "Não identificado na gravação.") -> str:
         return "\n".join(f"- {item}" for item in items) if items else f"- {empty}"
@@ -820,6 +1050,7 @@ def write_structured_files(job: dict, document: dict, steps: list[dict], workspa
 '''
     (workspace / "requisitos-rpa.md").write_text(requirements, encoding="utf-8")
     write_docx_document(job, document, workspace)
+    write_pdf_document(job, document, workspace)
 
     with (workspace / "matriz-evidencias.csv").open("w", newline="", encoding="utf-8-sig") as csv_file:
         writer = csv.writer(csv_file, delimiter=";")
@@ -830,6 +1061,37 @@ def write_structured_files(job: dict, document: dict, steps: list[dict], workspa
                 step.get("system", ""), step.get("field_or_control", ""), step.get("evidence", ""),
                 step.get("uncertainty", ""), step.get("image", ""), step.get("transcript", ""),
             ])
+
+
+def locate_in_preview(source_previews: list[dict] | None, moment: float, lead_in: float = 8.0) -> dict | None:
+    """Posiciona um instante da gravação dentro do preview já cortado, para revisitar a fala daquele trecho."""
+    try:
+        moment = float(moment)
+    except (TypeError, ValueError):
+        return None
+    for preview in source_previews or []:
+        if not preview.get("created") or not preview.get("file"):
+            continue
+        offset = float(preview.get("global_offset") or 0.0)
+        local = moment - offset
+        if local < 0:
+            continue
+        elapsed = 0.0
+        for item in preview.get("ranges") or []:
+            start = float(item["start"])
+            end = float(item["end"])
+            if start <= local <= end:
+                position = elapsed + (local - start)
+                return {
+                    "file": preview["file"],
+                    "play_from": round(max(elapsed, position - lead_in), 3),
+                    "play_to": round(elapsed + (end - start), 3),
+                    "cut_start": offset + start,
+                    "cut_end": offset + end,
+                    "source_name": preview.get("source_name") or "",
+                }
+            elapsed += end - start
+    return None
 
 
 def write_report(job: dict, steps: list[dict], workspace: Path, video: Path, document: dict | None = None, source_previews: list[dict] | None = None):
@@ -891,7 +1153,21 @@ def write_report(job: dict, steps: list[dict], workspace: Path, video: Path, doc
     actors = "".join(f"<li><strong>{safe(item.get('name'))}</strong><span>{safe(item.get('responsibility') or 'Responsabilidade não identificada')}</span></li>" for item in document.get("actors", [])) or '<li class="empty">Não identificados.</li>'
     systems = "".join(f"<li><strong>{safe(item.get('name'))}</strong><span>{safe(item.get('purpose') or 'Finalidade não identificada')}</span></li>" for item in document.get("systems", [])) or '<li class="empty">Não identificados.</li>'
     opportunities = "".join(f'''<article class="opportunity"><h3>{safe(item.get('opportunity'))}</h3><p><b>Benefício:</b> {safe(item.get('benefit') or 'A validar')}</p><p><b>Dependência:</b> {safe(item.get('dependency') or 'A validar')}</p></article>''' for item in document.get("automation_opportunities", [])) or '<p class="empty">Nenhuma oportunidade foi confirmada com os insumos disponíveis.</p>'
-    evidence_cards = "".join(f'''<article class="evidence-card" id="evidence-{safe(step.get('frame_index') or index)}"><img src="evidence/{safe(step['image'])}" alt="Evidência da etapa"><div><span>{safe(step.get('timecode'))} · {safe(step.get('system') or 'Sistema não identificado')}</span><h3>{safe(step.get('title') or 'Etapa observada')}</h3><p>{safe(step.get('action'))}</p><dl><dt>Controle ou campo</dt><dd>{safe(step.get('field_or_control') or 'Não identificado')}</dd><dt>O que comprova</dt><dd>{safe(step.get('evidence'))}</dd></dl><details><summary>Ver fala relacionada</summary><p>{safe(step.get('transcript') or 'Sem fala detectada neste trecho.')}</p></details></div></article>''' for index, step in enumerate(relevant_steps, 1))
+    def evidence_media(step: dict) -> str:
+        image = f'<img src="evidence/{safe(step.get("image"))}" alt="Evidência da etapa">'
+        cut = locate_in_preview(source_previews, step.get("time"))
+        if not cut:
+            return f'<div class="evidence-media">{image}<small>Momento fora dos cortes do preview; a imagem permanece como referência.</small></div>'
+        label = f'Corte {format_time(cut["cut_start"])}–{format_time(cut["cut_end"])}'
+        if cut["source_name"]:
+            label += f' · {cut["source_name"]}'
+        return (
+            f'<div class="evidence-media"><video controls preload="none" poster="evidence/{safe(step.get("image"))}"'
+            f' src="{safe(cut["file"])}#t={cut["play_from"]},{cut["play_to"]}"></video>'
+            f'<small>{safe(label)}</small></div>'
+        )
+
+    evidence_cards = "".join(f'''<article class="evidence-card" id="evidence-{safe(step.get('frame_index') or index)}">{evidence_media(step)}<div><span>{safe(step.get('timecode'))} · {safe(step.get('system') or 'Sistema não identificado')}</span><h3>{safe(step.get('title') or 'Etapa observada')}</h3><p>{safe(step.get('action'))}</p><dl><dt>Controle ou campo</dt><dd>{safe(step.get('field_or_control') or 'Não identificado')}</dd><dt>O que comprova</dt><dd>{safe(step.get('evidence'))}</dd></dl><details><summary>Ver fala relacionada</summary><p>{safe(step.get('transcript') or 'Sem fala detectada neste trecho.')}</p></details></div></article>''' for index, step in enumerate(relevant_steps, 1))
     preview_items = [item for item in (source_previews or []) if item.get("created") and item.get("file")]
     if preview_items:
         preview_cards = "".join(f'''<article><h3>{safe(item.get('source_name') or f"Gravação {index}")}</h3><p>{safe(format_time(item.get('duration', 0)))} de conteúdo relevante</p><video controls preload="metadata" src="{safe(item['file'])}"></video><p><a href="{safe(item['file'])}" target="_blank">Abrir preview</a> · <a href="{safe(item['file'])}" download>Baixar separadamente</a></p></article>''' for index, item in enumerate(preview_items, 1))
@@ -900,7 +1176,7 @@ def write_report(job: dict, steps: list[dict], workspace: Path, video: Path, doc
         preview = '<section class="preview"><h2>Preview do processo</h2><p>Trechos selecionados principalmente pelo conteúdo falado; os frames confirmam e ilustram cada explicação relevante.</p><video controls preload="metadata" src="preview-processo.mp4"></video><p><a href="preview-processo.mp4" target="_blank">Abrir preview em nova aba</a> · <a href="preview-processo.mp4" download>Baixar preview</a></p></section>'
     else:
         preview = ""
-    html = f'''<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>{safe(job['title'])}</title><style>:root{{--navy:#102d46;--teal:#168d8a;--ink:#172b3a;--muted:#61798a}}*{{box-sizing:border-box}}body{{font:15px/1.55 Arial;margin:0;background:#f3f5f7;color:var(--ink)}}header{{padding:46px max(5vw,24px);background:var(--navy);color:white}}header p{{max-width:850px}}main{{max-width:1120px;margin:30px auto;padding:0 20px}}section{{margin:22px 0}}.panel{{background:white;padding:24px;border-radius:14px;box-shadow:0 4px 20px #1231}}.summary{{font-size:18px;max-width:900px}}.deliverables{{display:flex;flex-wrap:wrap;gap:8px;margin-top:20px}}.deliverables a,.preview a,.evidence-ref{{color:var(--teal);font-weight:bold;text-decoration:none}}.deliverables a{{padding:9px 12px;background:#e8f5f4;border-radius:8px}}.preview{{background:var(--navy);color:white;padding:22px;border-radius:14px}}video{{display:block;width:100%;max-height:620px;margin-top:14px;background:#000;border-radius:9px}}.columns{{display:grid;grid-template-columns:1fr 1fr;gap:18px}}.entity-list{{list-style:none;padding:0}}.entity-list li{{display:flex;flex-direction:column;padding:10px 0;border-bottom:1px solid #e1e8ed}}.flow-step{{display:grid;grid-template-columns:48px 1fr;gap:15px;background:white;margin:12px 0;padding:20px;border-radius:12px;border-left:4px solid var(--teal)}}.flow-step>b{{display:grid;place-items:center;width:38px;height:38px;border-radius:50%;background:var(--navy);color:white}}.flow-step footer{{display:flex;flex-wrap:wrap;gap:7px;margin-top:12px}}.evidence-ref{{padding:5px 8px;background:#e8f5f4;border-radius:7px;font-size:12px}}.not-confirmed,.empty{{color:var(--muted);font-style:italic}}table{{width:100%;border-collapse:collapse;background:white}}th,td{{padding:11px;text-align:left;border-bottom:1px solid #dce5eb;vertical-align:top}}th{{background:#eaf0f4}}.rules li{{margin:9px 0}}.opportunities{{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px}}.opportunity{{background:#e8f5f4;padding:16px;border-radius:10px}}.evidence-card{{display:grid;grid-template-columns:42% 1fr;gap:22px;background:white;margin:15px 0;padding:18px;border-radius:14px}}.evidence-card img{{width:100%;border-radius:8px;border:1px solid #ccd4dc}}span,dt{{color:#547086;font-size:12px;font-weight:bold}}h2{{margin-top:0}}h3{{margin:5px 0}}dl{{display:grid;grid-template-columns:150px 1fr;gap:7px 12px}}dd{{margin:0}}details{{margin-top:12px}}@media(max-width:760px){{.columns,.evidence-card{{grid-template-columns:1fr}}.flow-step{{grid-template-columns:38px 1fr}}dl{{grid-template-columns:1fr}}}}</style></head><body><header><small>DOCUMENTAÇÃO ESTRUTURADA PÓS-DISCOVERY DE RPA</small><h1>{safe(job['title'])}</h1><p>Público: {safe(job.get('audience'))} · Nível: {safe(job.get('detail_level'))}</p><nav class="deliverables"><a href="documentacao-processo.docx" download>Documento Word editável</a><a href="procedimento-operacional.md" download>Procedimento operacional</a><a href="requisitos-rpa.md" download>Requisitos para RPA</a><a href="matriz-evidencias.csv" download>Matriz de evidências</a><a href="documentacao-processo.json" download>Dados estruturados</a></nav></header><main><section class="panel"><small>VISÃO GERAL</small><h2>Resumo executivo</h2><p class="summary">{safe(document.get('executive_summary'))}</p><h3>Objetivo</h3><p>{safe(document.get('objective'))}</p></section><section class="columns"><div class="panel"><h2>Escopo incluído</h2>{list_html(document.get('scope', {}).get('in_scope', []))}</div><div class="panel"><h2>Fora do escopo</h2>{list_html(document.get('scope', {}).get('out_of_scope', []))}</div></section><section class="columns"><div class="panel"><h2>Atores e responsabilidades</h2><ul class="entity-list">{actors}</ul></div><div class="panel"><h2>Sistemas envolvidos</h2><ul class="entity-list">{systems}</ul></div></section><section class="panel"><h2>Pré-requisitos</h2>{list_html(document.get('prerequisites', []))}</section><section class="columns"><div class="panel"><h2>Entradas</h2><table><thead><tr><th>Entrada</th><th>Origem</th><th>Obrigatoriedade</th></tr></thead><tbody>{input_rows}</tbody></table></div><div class="panel"><h2>Saídas</h2><table><thead><tr><th>Saída</th><th>Destino</th></tr></thead><tbody>{output_rows}</tbody></table></div></section><section><small>PROCESSO ATUAL</small><h2>Fluxo operacional consolidado</h2>{flow_cards or '<p class="empty">Nenhuma etapa foi identificada.</p>'}</section><section class="panel"><h2>Regras de negócio</h2><ol class="rules">{rules}</ol></section><section class="panel"><h2>Exceções e tratamentos</h2><table><thead><tr><th>Cenário</th><th>Tratamento</th><th>Status</th></tr></thead><tbody>{exceptions}</tbody></table></section><section class="panel"><h2>Riscos e controles</h2><table><thead><tr><th>Risco</th><th>Impacto</th><th>Controle</th></tr></thead><tbody>{risks}</tbody></table></section><section><h2>Oportunidades de automação</h2><div class="opportunities">{opportunities}</div></section><section class="columns"><div class="panel"><h2>Pontos a validar</h2>{list_html(document.get('open_questions', []), 'Nenhum ponto adicional registrado.')}</div><div class="panel"><h2>Limitações desta análise</h2>{list_html(document.get('limitations', []))}</div></section>{preview}<section><small>ANEXO DE COMPROVAÇÃO</small><h2>Matriz visual e falas relacionadas</h2><p>As evidências abaixo sustentam a documentação. Elas não substituem o fluxo consolidado acima.</p>{evidence_cards or '<p>Nenhuma evidência visual foi identificada.</p>'}</section></main></body></html>'''
+    html = f'''<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>{safe(job['title'])}</title><style>:root{{--navy:#102d46;--teal:#168d8a;--ink:#172b3a;--muted:#61798a}}*{{box-sizing:border-box}}body{{font:15px/1.55 Arial;margin:0;background:#f3f5f7;color:var(--ink)}}header{{padding:46px max(5vw,24px);background:var(--navy);color:white}}header p{{max-width:850px}}main{{max-width:1120px;margin:30px auto;padding:0 20px}}section{{margin:22px 0}}.panel{{background:white;padding:24px;border-radius:14px;box-shadow:0 4px 20px #1231}}.summary{{font-size:18px;max-width:900px}}.deliverables{{display:flex;flex-wrap:wrap;gap:8px;margin-top:20px}}.deliverables a,.preview a,.evidence-ref{{color:var(--teal);font-weight:bold;text-decoration:none}}.deliverables a{{padding:9px 12px;background:#e8f5f4;border-radius:8px}}.preview{{background:var(--navy);color:white;padding:22px;border-radius:14px}}video{{display:block;width:100%;max-height:620px;margin-top:14px;background:#000;border-radius:9px}}.columns{{display:grid;grid-template-columns:1fr 1fr;gap:18px}}.entity-list{{list-style:none;padding:0}}.entity-list li{{display:flex;flex-direction:column;padding:10px 0;border-bottom:1px solid #e1e8ed}}.flow-step{{display:grid;grid-template-columns:48px 1fr;gap:15px;background:white;margin:12px 0;padding:20px;border-radius:12px;border-left:4px solid var(--teal)}}.flow-step>b{{display:grid;place-items:center;width:38px;height:38px;border-radius:50%;background:var(--navy);color:white}}.flow-step footer{{display:flex;flex-wrap:wrap;gap:7px;margin-top:12px}}.evidence-ref{{padding:5px 8px;background:#e8f5f4;border-radius:7px;font-size:12px}}.not-confirmed,.empty{{color:var(--muted);font-style:italic}}table{{width:100%;border-collapse:collapse;background:white}}th,td{{padding:11px;text-align:left;border-bottom:1px solid #dce5eb;vertical-align:top}}th{{background:#eaf0f4}}.rules li{{margin:9px 0}}.opportunities{{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px}}.opportunity{{background:#e8f5f4;padding:16px;border-radius:10px}}.evidence-card{{display:grid;grid-template-columns:42% 1fr;gap:22px;background:white;margin:15px 0;padding:18px;border-radius:14px}}.evidence-card img{{width:100%;border-radius:8px;border:1px solid #ccd4dc}}.evidence-media{{min-width:0}}.evidence-media video{{margin-top:0;max-height:none;border:1px solid #ccd4dc;border-radius:8px}}.evidence-media small{{display:block;margin-top:8px;color:#547086;font-size:11px;font-weight:bold}}span,dt{{color:#547086;font-size:12px;font-weight:bold}}h2{{margin-top:0}}h3{{margin:5px 0}}dl{{display:grid;grid-template-columns:150px 1fr;gap:7px 12px}}dd{{margin:0}}details{{margin-top:12px}}@media(max-width:760px){{.columns,.evidence-card{{grid-template-columns:1fr}}.flow-step{{grid-template-columns:38px 1fr}}dl{{grid-template-columns:1fr}}}}</style></head><body><header><small>DOCUMENTAÇÃO ESTRUTURADA PÓS-DISCOVERY DE RPA</small><h1>{safe(job['title'])}</h1><p>Público: {safe(job.get('audience'))} · Nível: {safe(job.get('detail_level'))}</p><nav class="deliverables"><a href="documentacao-processo.docx" download>Documento Word editável</a><a href="documentacao-processo.pdf" download>Documento PDF</a><a href="procedimento-operacional.md" download>Procedimento operacional</a><a href="requisitos-rpa.md" download>Requisitos para RPA</a><a href="matriz-evidencias.csv" download>Matriz de evidências</a><a href="documentacao-processo.json" download>Dados estruturados</a></nav></header><main><section class="panel"><small>VISÃO GERAL</small><h2>Resumo executivo</h2><p class="summary">{safe(document.get('executive_summary'))}</p><h3>Objetivo</h3><p>{safe(document.get('objective'))}</p></section><section class="columns"><div class="panel"><h2>Escopo incluído</h2>{list_html(document.get('scope', {}).get('in_scope', []))}</div><div class="panel"><h2>Fora do escopo</h2>{list_html(document.get('scope', {}).get('out_of_scope', []))}</div></section><section class="columns"><div class="panel"><h2>Atores e responsabilidades</h2><ul class="entity-list">{actors}</ul></div><div class="panel"><h2>Sistemas envolvidos</h2><ul class="entity-list">{systems}</ul></div></section><section class="panel"><h2>Pré-requisitos</h2>{list_html(document.get('prerequisites', []))}</section><section class="columns"><div class="panel"><h2>Entradas</h2><table><thead><tr><th>Entrada</th><th>Origem</th><th>Obrigatoriedade</th></tr></thead><tbody>{input_rows}</tbody></table></div><div class="panel"><h2>Saídas</h2><table><thead><tr><th>Saída</th><th>Destino</th></tr></thead><tbody>{output_rows}</tbody></table></div></section><section><small>PROCESSO ATUAL</small><h2>Fluxo operacional consolidado</h2>{flow_cards or '<p class="empty">Nenhuma etapa foi identificada.</p>'}</section><section class="panel"><h2>Regras de negócio</h2><ol class="rules">{rules}</ol></section><section class="panel"><h2>Exceções e tratamentos</h2><table><thead><tr><th>Cenário</th><th>Tratamento</th><th>Status</th></tr></thead><tbody>{exceptions}</tbody></table></section><section class="panel"><h2>Riscos e controles</h2><table><thead><tr><th>Risco</th><th>Impacto</th><th>Controle</th></tr></thead><tbody>{risks}</tbody></table></section><section><h2>Oportunidades de automação</h2><div class="opportunities">{opportunities}</div></section><section class="columns"><div class="panel"><h2>Pontos a validar</h2>{list_html(document.get('open_questions', []), 'Nenhum ponto adicional registrado.')}</div><div class="panel"><h2>Limitações desta análise</h2>{list_html(document.get('limitations', []))}</div></section>{preview}<section><small>ANEXO DE COMPROVAÇÃO</small><h2>Matriz visual e falas relacionadas</h2><p>Cada evidência abre o corte em que o assunto é falado, começando pouco antes do print e seguindo até o fim do trecho. As evidências sustentam a documentação e não substituem o fluxo consolidado acima.</p>{evidence_cards or '<p>Nenhuma evidência visual foi identificada.</p>'}</section></main></body></html>'''
     (workspace / "relatorio.html").write_text(html, encoding="utf-8")
 
 
@@ -921,4 +1197,4 @@ def process(job: dict, workspace: Path, progress):
     progress(92, "Montando a documentação e o pacote completo")
     write_report(job, steps, workspace, video, documentation, source_previews)
     create_package(workspace)
-    return {"video": str(video), "source_files": [str(item) for item in source_videos], "source_count": len(source_videos), "evidence_count": len(evidence), "transcript_segments": len(transcript), "step_count": len(steps), "process_step_count": len(documentation.get("process_flow", [])), "deliverables": ["relatorio.html", "documentacao-processo.docx", "procedimento-operacional.md", "requisitos-rpa.md", "matriz-evidencias.csv", "documentacao-processo.json", "previews separados", "roteiro-cortes.json"], "preview": preview, "previews": source_previews}
+    return {"video": str(video), "source_files": [str(item) for item in source_videos], "source_count": len(source_videos), "evidence_count": len(evidence), "transcript_segments": len(transcript), "step_count": len(steps), "process_step_count": len(documentation.get("process_flow", [])), "deliverables": ["relatorio.html", "documentacao-processo.docx", "documentacao-processo.pdf", "procedimento-operacional.md", "requisitos-rpa.md", "matriz-evidencias.csv", "documentacao-processo.json", "previews separados", "roteiro-cortes.json"], "preview": preview, "previews": source_previews}

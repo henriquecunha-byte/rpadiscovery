@@ -7,7 +7,7 @@ from pathlib import Path
 from rpa_docs.database import Database
 from rpa_docs.uploads import extract_video_zip, safe_upload_path
 from rpa_docs.drive import extract_folder_id
-from rpa_docs.pipeline import create_job_previews, create_package, create_preview, extract_evidence, format_time, parse_timecode, preview_ranges, preview_ranges_from_moments, write_report
+from rpa_docs.pipeline import create_job_previews, create_package, create_preview, extract_evidence, fallback_process_prompt, format_time, locate_in_preview, parse_timecode, preview_ranges, preview_ranges_from_moments, write_pdf_document, write_report
 
 
 class CoreTests(unittest.TestCase):
@@ -36,7 +36,9 @@ class CoreTests(unittest.TestCase):
             self.assertTrue((workspace / "requisitos-rpa.md").exists())
             self.assertTrue((workspace / "matriz-evidencias.csv").exists())
             self.assertTrue((workspace / "documentacao-processo.docx").exists())
+            self.assertTrue((workspace / "documentacao-processo.pdf").exists())
             report = (workspace / "relatorio.html").read_text(encoding="utf-8")
+            self.assertIn('href="documentacao-processo.pdf"', report)
             self.assertIn("Fluxo operacional consolidado", report)
             self.assertIn("Regras de negócio", report)
 
@@ -58,6 +60,98 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(candidates, ["cancel01"])
             self.assertEqual(database.delete_jobs(candidates), 1)
             self.assertIsNone(database.get_job("cancel01"))
+
+    def test_pdf_export_keeps_documentation_sections(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            workspace = Path(temporary)
+            job = {"title": "Emissão de notas", "audience": "Equipe de RPA", "detail_level": "detalhado"}
+            document = {
+                "executive_summary": "Consolidação dos contratos e emissão das notas do ciclo.",
+                "objective": "Emitir as notas sem divergência de valor.",
+                "scope": {"in_scope": ["Contratos ativos"], "out_of_scope": ["Cobrança"]},
+                "actors": [{"name": "Analista", "responsibility": "Confere e emite."}],
+                "systems": [{"name": "ERP", "purpose": "Emissão fiscal"}],
+                "prerequisites": ["Acesso ao módulo fiscal"],
+                "inputs": [{"name": "Contratos", "source": "ERP", "required": "Obrigatória"}],
+                "outputs": [{"name": "Notas", "destination": "Portal"}],
+                "business_rules": [{"rule": "Sem reajuste não fatura.", "evidence_refs": [1]}],
+                "process_flow": [{"sequence": 1, "title": "Abrir contratos", "description": "Filtra os ativos.", "actor": "Analista", "system": "ERP", "input": "Competência", "output": "Lista", "decision_or_exception": "", "evidence_refs": [1]}],
+                "exceptions": [], "risks_and_controls": [], "open_questions": [],
+                "automation_opportunities": [], "limitations": ["Somente fatos observáveis."],
+            }
+            path = write_pdf_document(job, document, workspace)
+            self.assertEqual(path, workspace / "documentacao-processo.pdf")
+            self.assertTrue(path.exists())
+            content = path.read_bytes()
+            self.assertTrue(content.startswith(b"%PDF-"))
+            self.assertGreater(len(content), 2000)
+
+    def test_prompt_fallback_declares_subject_and_cut_rule(self):
+        prompt = fallback_process_prompt({
+            "title": "Faturamento de contratos",
+            "audience": "Equipe fiscal",
+            "detail_level": "detalhado",
+            "process_context": "",
+            "sources": ["reuniao-1.mp4", "reuniao-2.mp4"],
+        })
+        first_line = prompt.splitlines()[0]
+        self.assertTrue(first_line.startswith("Assunto do discovery:"))
+        self.assertIn("Faturamento de contratos", first_line)
+        self.assertIn("reuniao-2.mp4", prompt)
+        self.assertIn("Equipe fiscal", prompt)
+        self.assertIn("Descarte", prompt)
+        written = fallback_process_prompt({"title": "Genérico", "process_context": "Somente o case Trevo"})
+        self.assertIn("Somente o case Trevo", written.splitlines()[0])
+
+    def test_evidence_maps_to_the_cut_where_it_is_spoken(self):
+        previews = [
+            {"created": True, "file": "previews/001-a-preview.mp4", "source_name": "a.mp4", "global_offset": 0,
+             "ranges": [{"start": 100.0, "end": 160.0}, {"start": 300.0, "end": 360.0}]},
+            {"created": True, "file": "previews/002-b-preview.mp4", "source_name": "b.mp4", "global_offset": 600.0,
+             "ranges": [{"start": 40.0, "end": 100.0}]},
+        ]
+        # primeiro corte: o instante 130 fica 30s depois do início do corte, e o preview começa nele
+        first = locate_in_preview(previews, 130.0)
+        self.assertEqual(first["file"], "previews/001-a-preview.mp4")
+        self.assertEqual(first["play_from"], 22.0)
+        self.assertEqual(first["play_to"], 60.0)
+        self.assertEqual((first["cut_start"], first["cut_end"]), (100.0, 160.0))
+        # segundo corte do mesmo arquivo: o tempo acumulado do corte anterior entra na conta
+        second = locate_in_preview(previews, 310.0)
+        self.assertEqual(second["play_from"], 62.0)
+        self.assertEqual(second["play_to"], 120.0)
+        # o lead-in nunca ultrapassa o início do corte
+        self.assertEqual(locate_in_preview(previews, 101.0)["play_from"], 0.0)
+        # segunda gravação da pilha: o deslocamento global é descontado
+        third = locate_in_preview(previews, 700.0)
+        self.assertEqual(third["file"], "previews/002-b-preview.mp4")
+        self.assertEqual(third["source_name"], "b.mp4")
+        self.assertEqual(third["play_from"], 52.0)
+        # instantes fora dos cortes não recebem vídeo
+        self.assertIsNone(locate_in_preview(previews, 200.0))
+        self.assertIsNone(locate_in_preview(previews, 5000.0))
+        self.assertIsNone(locate_in_preview(previews, None))
+        self.assertIsNone(locate_in_preview(None, 130.0))
+        self.assertIsNone(locate_in_preview([{"created": False, "file": None, "ranges": []}], 130.0))
+
+    def test_report_evidence_plays_the_spoken_cut(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            workspace = Path(temporary)
+            (workspace / "evidence").mkdir()
+            job = {"title": "Cadastro", "source_path": "video.mp4", "process_context": "", "audience": "RPA", "detail_level": "operacional"}
+            steps = [
+                {"frame_index": 1, "image": "evidencia-0001.jpg", "time": 130, "timecode": "00:02:10", "title": "Abrir pedido", "action": "Acessa o cadastro.", "system": "ERP", "evidence": "Tela visível."},
+                {"frame_index": 2, "image": "evidencia-0002.jpg", "time": 200, "timecode": "00:03:20", "title": "Conferir saldo", "action": "Confere o saldo.", "system": "ERP", "evidence": "Saldo visível."},
+            ]
+            previews = [{"created": True, "file": "previews/001-a-preview.mp4", "source_name": "a.mp4",
+                         "ranges": [{"start": 100.0, "end": 160.0}]}]
+            write_report(job, steps, workspace, Path("video.mp4"), None, previews)
+            report = (workspace / "relatorio.html").read_text(encoding="utf-8")
+            self.assertIn('poster="evidence/evidencia-0001.jpg"', report)
+            self.assertIn('src="previews/001-a-preview.mp4#t=22.0,60.0"', report)
+            self.assertIn("Corte 00:01:40–00:02:40 · a.mp4", report)
+            self.assertIn("Momento fora dos cortes do preview", report)
+            self.assertIn('<img src="evidence/evidencia-0002.jpg"', report)
 
     def test_time_format(self):
         self.assertEqual(format_time(3661), "01:01:01")
@@ -116,6 +210,7 @@ class CoreTests(unittest.TestCase):
             (root / "requisitos-rpa.md").write_text("requisitos", encoding="utf-8")
             (root / "matriz-evidencias.csv").write_text("evidencia", encoding="utf-8")
             (root / "documentacao-processo.docx").write_bytes(b"docx")
+            (root / "documentacao-processo.pdf").write_bytes(b"%PDF-1.4")
             (root / "transcricao.json").write_text("[]", encoding="utf-8")
             (root / "evidence").mkdir()
             (root / "evidence" / "evidencia-0001.jpg").write_bytes(b"jpg")
@@ -128,6 +223,7 @@ class CoreTests(unittest.TestCase):
                 self.assertIn("requisitos-rpa.md", delivery.namelist())
                 self.assertIn("matriz-evidencias.csv", delivery.namelist())
                 self.assertIn("documentacao-processo.docx", delivery.namelist())
+                self.assertIn("documentacao-processo.pdf", delivery.namelist())
                 self.assertIn("roteiro-cortes.json", delivery.namelist())
 
     def test_file_stack_creates_separate_previews(self):
