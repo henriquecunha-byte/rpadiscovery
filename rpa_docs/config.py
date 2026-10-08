@@ -7,9 +7,11 @@ from dotenv import load_dotenv
 
 ROOT = Path(__file__).resolve().parents[1]
 load_dotenv(ROOT / ".env")
-DATA_DIR = ROOT / "data"
-JOBS_DIR = ROOT / "jobs"
-CACHE_DIR = ROOT / "cache"
+# Keep QA and deployments isolated while loading credentials from the project.
+DATA_ROOT = Path(os.getenv("RPA_DATA_ROOT") or ROOT).expanduser().resolve()
+DATA_DIR = DATA_ROOT / "data"
+JOBS_DIR = DATA_ROOT / "jobs"
+CACHE_DIR = DATA_ROOT / "cache"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 DATABASE = DATA_DIR / "rpa_docs.sqlite3"
 for directory in (DATA_DIR, JOBS_DIR, CACHE_DIR):

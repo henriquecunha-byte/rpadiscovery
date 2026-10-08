@@ -1,7 +1,11 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
-class JobCreate(BaseModel):
+class InputModel(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, allow_inf_nan=False)
+
+
+class JobCreate(InputModel):
     title: str = Field(min_length=2, max_length=120)
     source_path: str = Field(min_length=1)
     process_context: str = Field(default="", max_length=8000)
@@ -11,7 +15,7 @@ class JobCreate(BaseModel):
     api_budget_usd: float = Field(default=1.0, ge=0.1, le=50.0)
 
 
-class PromptSuggestion(BaseModel):
+class PromptSuggestion(InputModel):
     title: str = Field(default="", max_length=120)
     process_context: str = Field(default="", max_length=8000)
     audience: str = Field(default="Equipe de RPA", max_length=160)
@@ -19,11 +23,11 @@ class PromptSuggestion(BaseModel):
     sources: list[str] = Field(default_factory=list, max_length=100)
 
 
-class DriveUpload(BaseModel):
+class DriveUpload(InputModel):
     folder: str = Field(default="", max_length=1000)
 
 
-class DriveImport(BaseModel):
+class DriveImport(InputModel):
     title: str = Field(min_length=2, max_length=120)
     file_ids: list[str] = Field(min_length=1, max_length=100)
     process_context: str = Field(default="", max_length=8000)

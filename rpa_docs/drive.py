@@ -6,6 +6,8 @@ import secrets
 from pathlib import Path
 
 from .config import DATA_DIR
+from .uploads import safe_upload_path, unique_upload_path
+from .pipeline import VIDEO_EXTENSIONS
 
 
 TOKEN_PATH = DATA_DIR / "google-drive-token.json"
@@ -112,18 +114,28 @@ def list_files(folder_id: str = "root", search: str = "") -> list[dict]:
 
     service = build("drive", "v3", credentials=creds, cache_discovery=False)
     folder_id = extract_folder_id(folder_id) or "root"
-    query = f"'{folder_id}' in parents and trashed = false"
+    def query_literal(value):
+        return value.replace("\\", "\\\\").replace("'", "\\'")
+
+    query = f"'{query_literal(folder_id)}' in parents and trashed = false"
     if search.strip():
-        escaped = search.strip().replace("'", "\\'")
+        escaped = query_literal(search.strip())
         query += f" and name contains '{escaped}'"
-    result = service.files().list(
-        q=query,
-        pageSize=200,
-        orderBy="folder,name_natural",
-        fields="files(id,name,mimeType,size,modifiedTime,webViewLink)",
-    ).execute()
     allowed = {"application/zip", "application/x-zip-compressed", "application/vnd.google-apps.folder"}
-    return [item for item in result.get("files", []) if item.get("mimeType", "").startswith("video/") or item.get("mimeType") in allowed]
+    files = []
+    page_token = None
+    seen_tokens = set()
+    while True:
+        arguments = dict(q=query, pageSize=200, orderBy="folder,name_natural", fields="nextPageToken,files(id,name,mimeType,size,modifiedTime,webViewLink)", supportsAllDrives=True, includeItemsFromAllDrives=True)
+        if page_token:
+            arguments["pageToken"] = page_token
+        result = service.files().list(**arguments).execute()
+        files.extend(item for item in result.get("files", []) if item.get("mimeType", "").startswith("video/") or item.get("mimeType") in allowed)
+        page_token = result.get("nextPageToken")
+        if not page_token or page_token in seen_tokens:
+            break
+        seen_tokens.add(page_token)
+    return files
 
 
 def download_files(file_ids: list[str], destination: Path) -> list[Path]:
@@ -136,17 +148,27 @@ def download_files(file_ids: list[str], destination: Path) -> list[Path]:
     service = build("drive", "v3", credentials=creds, cache_discovery=False)
     destination.mkdir(parents=True, exist_ok=True)
     downloaded = []
-    for file_id in file_ids:
-        metadata = service.files().get(fileId=file_id, fields="id,name,mimeType,size").execute()
+    for file_id in dict.fromkeys(file_ids):
+        metadata = service.files().get(fileId=file_id, fields="id,name,mimeType,size", supportsAllDrives=True).execute()
         if metadata.get("mimeType") == "application/vnd.google-apps.folder":
             raise RuntimeError("Abra a pasta no seletor e escolha os vídeos ou ZIPs dentro dela.")
-        name = Path(metadata.get("name") or file_id).name
-        target = destination / name
-        request = service.files().get_media(fileId=file_id)
-        with target.open("wb") as stream:
-            downloader = MediaIoBaseDownload(stream, request, chunksize=8 * 1024 * 1024)
-            done = False
-            while not done:
-                _, done = downloader.next_chunk()
+        name = str(metadata.get("name") or file_id)
+        target = unique_upload_path(safe_upload_path(destination, name))
+        if target.suffix.lower() not in VIDEO_EXTENSIONS | {".zip"}:
+            raise RuntimeError("Escolha vídeos compatíveis ou arquivos ZIP para importar do Google Drive.")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temporary = unique_upload_path(target.with_name(target.name + ".part"))
+        request = service.files().get_media(fileId=file_id, supportsAllDrives=True)
+        try:
+            with temporary.open("xb") as stream:
+                downloader = MediaIoBaseDownload(stream, request, chunksize=8 * 1024 * 1024)
+                done = False
+                while not done:
+                    _, done = downloader.next_chunk()
+            if not temporary.stat().st_size:
+                raise RuntimeError("O Google Drive retornou um arquivo vazio.")
+            temporary.replace(target)
+        finally:
+            temporary.unlink(missing_ok=True)
         downloaded.append(target)
     return downloaded

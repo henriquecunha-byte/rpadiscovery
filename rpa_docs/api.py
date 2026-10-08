@@ -4,18 +4,22 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from uuid import uuid4
 import json
+import os
 import shutil
+from urllib.parse import quote
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import ValidationError
+from starlette.concurrency import run_in_threadpool
 
-from .config import DATABASE, JOBS_DIR, STATIC_DIR
+from .config import DATABASE, JOBS_DIR, STATIC_DIR, FFMPEG, FFPROBE
 from .database import Database
 from .orchestrator import Orchestrator
 from .schemas import DriveImport, DriveUpload, JobCreate, PromptSuggestion
-from .pipeline import VIDEO_EXTENSIONS, create_job_previews, create_package, suggest_process_prompt, synthesize_documentation, write_pdf_document, write_report
-from .uploads import extract_video_zip, prepare_downloaded_inputs, safe_upload_path
+from .pipeline import VIDEO_EXTENSIONS, suggest_process_prompt, write_pdf_document
+from .uploads import extract_video_zip, prepare_downloaded_inputs, safe_upload_path, unique_upload_path
 from .drive import authorization_url, download_files, exchange_code, list_files, status as drive_status, upload_package
 
 
@@ -73,33 +77,75 @@ def recording_file(job_id: str, result: dict) -> Path | None:
     return None
 
 
+def existing_job_path(job_id: str, declared: str) -> Path | None:
+    if not declared:
+        return None
+    original = Path(declared)
+    candidates = [original]
+    if job_id in original.parts:
+        candidates.append((JOBS_DIR / job_id).joinpath(*original.parts[original.parts.index(job_id) + 1:]))
+    return next((path for path in candidates if path.exists()), None)
+
+
+def input_availability(job: dict) -> dict:
+    workspace = JOBS_DIR / job["id"]
+    result = parsed_result(job)
+    source = existing_job_path(job["id"], job["source_path"])
+    source_available = bool(source and (
+        (source.is_file() and source.suffix.lower() in VIDEO_EXTENSIONS)
+        or (source.is_dir() and any(path.is_file() and path.suffix.lower() in VIDEO_EXTENSIONS for path in source.rglob("*")))
+    ))
+    video = existing_job_path(job["id"], str(result.get("video") or job["source_path"]))
+    originals = result.get("source_files") or ([str(video)] if video else [])
+    recordings_available = bool(video and video.is_file() and originals and all(
+        (path := existing_job_path(job["id"], str(value))) and path.is_file() for value in originals
+    ))
+    evidence_available = not result.get("evidence_count") or any((workspace / "evidence").glob("*.jpg"))
+    rebuild_available = bool(recordings_available and evidence_available and (workspace / "relatorio.json").is_file() and (workspace / "transcricao.json").is_file())
+    retry_available = rebuild_available if job.get("operation") == "rebuild" else source_available
+    return {
+        "source_available": source_available,
+        "can_retry": job["status"] in {"FAILED", "CANCELLED"} and retry_available,
+        "retry_unavailable_reason": "Os arquivos deste trabalho não estão disponíveis neste ambiente. Restaure a pasta original do trabalho ou reutilize o pedido e envie as gravações novamente." if not retry_available else None,
+        "can_rebuild": job["status"] == "COMPLETED" and rebuild_available,
+        "rebuild_unavailable_reason": "Para revisar os cortes e documentos, restaure as gravações, a transcrição e as evidências deste trabalho. Você também pode reutilizar o pedido e enviar as gravações novamente." if not rebuild_available else None,
+    }
+
+
 def enrich(job: dict) -> dict:
     workspace = JOBS_DIR / job["id"]
     preview_path = workspace / "preview-processo.mp4"
     preview_version = preview_path.stat().st_mtime_ns if preview_path.exists() else None
     result = parsed_result(job)
+    job["result_json"] = result
     preview_items = []
     for item in result.get("previews") or []:
+        if not isinstance(item, dict):
+            continue
         relative = Path(item.get("file") or "")
         path = workspace / relative
         if not item.get("created"):
             preview_items.append(dict(item) | {"preview_url": None, "download_url": None})
             continue
-        if not relative.name or not path.exists():
+        if not relative.name or not path.is_file() or not (
+            relative.as_posix() == "preview-processo.mp4"
+            or (relative.parent.as_posix() == "previews" and relative.suffix.lower() == ".mp4")
+        ) or workspace.resolve() not in path.resolve().parents:
             continue
         version = path.stat().st_mtime_ns
         if relative.parent.as_posix() == "previews":
-            url = f"/api/jobs/{job['id']}/previews/{relative.name}?v={version}"
-            download_url = f"/api/jobs/{job['id']}/previews/{relative.name}?download=true&v={version}"
+            filename = quote(relative.name)
+            url = f"/api/jobs/{job['id']}/previews/{filename}?v={version}"
+            download_url = f"/api/jobs/{job['id']}/previews/{filename}?download=true&v={version}"
         else:
             url = f"/api/jobs/{job['id']}/preview-processo.mp4?v={version}"
             download_url = f"/api/jobs/{job['id']}/preview-download?v={version}"
         preview_items.append(dict(item) | {"preview_url": url, "download_url": download_url})
-    if not preview_items and preview_version:
+    if not preview_items and preview_version and "previews" not in result:
         preview_items = [{
             "index": 1,
             "source_name": Path(result.get("video") or "Gravação").name,
-            "duration": (result.get("preview") or {}).get("duration", 0),
+            "duration": (result.get("preview") if isinstance(result.get("preview"), dict) else {}).get("duration", 0),
             "created": True,
             "preview_url": f"/api/jobs/{job['id']}/preview-processo.mp4?v={preview_version}",
             "download_url": f"/api/jobs/{job['id']}/preview-download?v={preview_version}",
@@ -116,6 +162,38 @@ def enrich(job: dict) -> dict:
     job["recording_name"] = recording.name if recording else None
     job["recording_size"] = recording.stat().st_size if recording else None
     job["package_url"] = f"/api/jobs/{job['id']}/package" if (workspace / "entrega-completa.zip").exists() else None
+    job.update(input_availability(job))
+    job["documents"] = [
+        {"filename": filename, "label": label, "format": file_format,
+         "available": (workspace / filename).is_file(),
+         "url": f"/api/jobs/{job['id']}/{filename}" if (workspace / filename).is_file() else None}
+        for filename, label, file_format in (
+            ("documentacao-processo.docx", "Documentação do processo", "Word"),
+            ("documentacao-processo.pdf", "Documentação do processo", "PDF"),
+            ("procedimento-operacional.md", "Procedimento operacional", "Markdown"),
+            ("requisitos-rpa.md", "Requisitos de automação", "Markdown"),
+            ("matriz-evidencias.csv", "Matriz de evidências", "CSV"),
+            ("documentacao-processo.json", "Documentação estruturada", "JSON"),
+            ("roteiro-cortes.json", "Roteiro dos cortes", "JSON"),
+            ("transcricao.json", "Transcrição de referência", "JSON"),
+        )
+    ]
+    job["delivery_missing"] = job["status"] == "COMPLETED" and not (
+        job["report_url"] or job["package_url"] or any(item.get("preview_url") for item in preview_items)
+        or any(item["available"] for item in job["documents"])
+    )
+    job["delivery_missing_reason"] = (
+        "O histórico desta análise foi preservado, mas os vídeos e documentos não foram encontrados neste ambiente. Restaure a pasta original do trabalho ou reutilize o pedido para reenviar as gravações."
+        if job["delivery_missing"] else None
+    )
+    # During processing, previous/partial artifacts must not look like a new
+    # completed delivery. Retry/rebuild will publish the new result at the end.
+    if job["status"] != "COMPLETED":
+        job["previews"] = []
+        for key in ("report_url", "preview_url", "preview_download_url", "document_url", "pdf_url", "package_url"):
+            job[key] = None
+        for document in job["documents"]:
+            document.update(available=False, url=None)
     job["output_dir"] = str(workspace.resolve())
     job["timing"] = db.timing(job)
     return job
@@ -128,7 +206,11 @@ def index():
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "worker": worker.thread.is_alive()}
+    return {
+        "status": "ok", "worker": worker.thread.is_alive(),
+        "ffmpeg": bool(shutil.which(FFMPEG)), "ffprobe": bool(shutil.which(FFPROBE)),
+        "api_configured": bool(os.getenv("OPENAI_API_KEY", "").strip()),
+    }
 
 
 @app.get("/api/drive/status")
@@ -168,17 +250,19 @@ def jobs():
 
 @app.post("/api/jobs/cleanup")
 def cleanup_jobs():
-    job_ids = db.cleanup_candidates()
-    removed_folders = 0
     jobs_root = JOBS_DIR.resolve()
-    for job_id in job_ids:
+    def remove_workspace(job_id):
         workspace = (JOBS_DIR / job_id).resolve()
         if workspace.parent != jobs_root:
             raise HTTPException(400, "Pasta de trabalho inválida durante a limpeza.")
         if workspace.exists():
             shutil.rmtree(workspace)
-            removed_folders += 1
-    removed_jobs = db.delete_jobs(job_ids)
+            return True
+        return False
+    try:
+        removed_jobs, removed_folders = db.cleanup(remove_workspace)
+    except OSError as error:
+        raise HTTPException(409, "Não foi possível remover um arquivo em uso. Aguarde e tente novamente.") from error
     return {"removed_jobs": removed_jobs, "removed_folders": removed_folders}
 
 
@@ -203,6 +287,14 @@ def cancel_job(job_id: str):
 
 @app.post("/api/jobs/{job_id}/retry")
 def retry_job(job_id: str):
+    current = db.get_job(job_id)
+    if current and current["status"] in {"FAILED", "CANCELLED"}:
+        availability = input_availability(current)
+        if not availability["can_retry"]:
+            raise HTTPException(409, availability["retry_unavailable_reason"])
+        source = existing_job_path(job_id, current["source_path"])
+        if source and str(source) != current["source_path"]:
+            db.update(job_id, source_path=str(source))
     try:
         item = db.retry(job_id)
     except ValueError as error:
@@ -217,9 +309,13 @@ def create_job(payload: JobCreate):
     source = Path(payload.source_path)
     if not source.exists():
         raise HTTPException(400, "A gravação ou pasta selecionada não foi encontrada.")
+    if source.is_file() and source.suffix.lower() not in VIDEO_EXTENSIONS:
+        raise HTTPException(400, "Selecione um vídeo compatível ou uma pasta com gravações.")
+    if source.is_dir() and not any(path.is_file() and path.suffix.lower() in VIDEO_EXTENSIONS for path in source.rglob("*")):
+        raise HTTPException(400, "A pasta selecionada não contém vídeos compatíveis.")
     if not payload.api_approved:
         raise HTTPException(400, "Autorize a análise visual para iniciar este trabalho.")
-    return enrich(db.create_job(uuid4().hex[:12], payload.model_dump()))
+    return enrich(db.create_job(uuid4().hex[:12], payload.model_dump() | {"source_path": str(source.resolve())}))
 
 
 @app.post("/api/jobs/upload", status_code=201)
@@ -232,41 +328,48 @@ async def upload_job(
     api_budget_usd: float = Form(1.0),
     files: list[UploadFile] = File(...),
 ):
-    if not api_approved:
-        raise HTTPException(400, "Autorize a análise visual para iniciar este trabalho.")
     job_id = uuid4().hex[:12]
-    input_dir = JOBS_DIR / job_id / "input"
-    input_dir.mkdir(parents=True, exist_ok=True)
-    saved = 0
-    for upload in files:
-        suffix = Path(upload.filename or "").suffix.lower()
-        if suffix not in VIDEO_EXTENSIONS | {".zip"}:
-            continue
-        target = safe_upload_path(input_dir, upload.filename or f"video-{saved + 1}.mp4")
-        if target.exists():
-            original = target
-            duplicate = 2
-            while target.exists():
-                target = original.with_name(f"{original.stem}-{duplicate}{original.suffix}")
-                duplicate += 1
-        target.parent.mkdir(parents=True, exist_ok=True)
-        with target.open("wb") as destination:
-            while chunk := await upload.read(1024 * 1024):
-                destination.write(chunk)
-        await upload.close()
-        saved += extract_video_zip(target, input_dir) if suffix == ".zip" else 1
-    if not saved:
-        raise HTTPException(400, "Envie pelo menos um vídeo compatível.")
-    payload = JobCreate(
-        title=title,
-        source_path=str(input_dir),
-        process_context=process_context,
-        audience=audience,
-        detail_level=detail_level,
-        api_approved=True,
-        api_budget_usd=api_budget_usd,
-    )
-    return enrich(db.create_job(job_id, payload.model_dump()))
+    workspace = JOBS_DIR / job_id
+    input_dir = workspace / "input"
+    persisted = False
+    try:
+        if not api_approved:
+            raise HTTPException(400, "Autorize a análise visual para iniciar este trabalho.")
+        try:
+            payload = JobCreate(
+                title=title, source_path=str(input_dir), process_context=process_context,
+                audience=audience, detail_level=detail_level,
+                api_approved=True, api_budget_usd=api_budget_usd,
+            )
+        except ValidationError as error:
+            raise HTTPException(422, [{"loc": ["body", *item["loc"]], "msg": item["msg"], "type": item["type"]} for item in error.errors()]) from error
+        supported = [upload for upload in files if Path(upload.filename or "").suffix.lower() in VIDEO_EXTENSIONS | {".zip"}]
+        if not supported:
+            raise HTTPException(400, "Envie pelo menos um vídeo compatível ou um ZIP com gravações.")
+        # Validate every selected name before creating a job directory.
+        for upload in supported:
+            safe_upload_path(input_dir, upload.filename)
+        input_dir.mkdir(parents=True, exist_ok=False)
+        saved = 0
+        for upload in supported:
+            target = unique_upload_path(safe_upload_path(input_dir, upload.filename))
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with target.open("xb") as destination:
+                while chunk := await upload.read(1024 * 1024):
+                    destination.write(chunk)
+            if target.stat().st_size == 0:
+                raise HTTPException(400, f'O arquivo "{target.name}" está vazio.')
+            saved += await run_in_threadpool(extract_video_zip, target, input_dir) if target.suffix.lower() == ".zip" else 1
+        if not saved:
+            raise HTTPException(400, "Os arquivos enviados não contêm vídeos compatíveis.")
+        item = db.create_job(job_id, payload.model_dump())
+        persisted = True
+        return enrich(item)
+    finally:
+        for upload in files:
+            await upload.close()
+        if not persisted and workspace.exists():
+            await run_in_threadpool(shutil.rmtree, workspace)
 
 
 @app.get("/api/drive/files")
@@ -286,12 +389,14 @@ def import_from_drive(payload: DriveImport):
     try:
         downloaded = download_files(payload.file_ids, input_dir)
         saved = prepare_downloaded_inputs(downloaded, input_dir)
-    except HTTPException:
-        raise
+        if not saved:
+            raise HTTPException(400, "Os arquivos escolhidos não contêm vídeos compatíveis.")
     except Exception as error:
+        if input_dir.parent.exists():
+            shutil.rmtree(input_dir.parent)
+        if isinstance(error, HTTPException):
+            raise
         raise HTTPException(400, str(error)) from error
-    if not saved:
-        raise HTTPException(400, "Os arquivos escolhidos não contêm vídeos compatíveis.")
     job_payload = JobCreate(
         title=payload.title,
         source_path=str(input_dir),
@@ -318,9 +423,11 @@ def report(job_id: str):
 
 @app.get("/api/jobs/{job_id}/evidence/{filename}")
 def evidence(job_id: str, filename: str):
+    if not db.get_job(job_id):
+        raise HTTPException(404, "Trabalho não encontrado")
     directory = (JOBS_DIR / job_id / "evidence").resolve()
     path = (directory / filename).resolve()
-    if path.parent != directory or not path.exists():
+    if path.parent != directory or not path.is_file():
         raise HTTPException(404, "Evidência não encontrada")
     return FileResponse(path)
 
@@ -400,55 +507,27 @@ def package(job_id: str):
     return FileResponse(path, media_type="application/zip", filename=f"{job_id}-documentacao-rpa.zip")
 
 
-@app.post("/api/jobs/{job_id}/rebuild-documents")
+@app.post("/api/jobs/{job_id}/rebuild-documents", status_code=202)
 def rebuild_documents(job_id: str):
     item = db.get_job(job_id)
     if not item:
         raise HTTPException(404, "Trabalho não encontrado")
     if item["status"] != "COMPLETED":
         raise HTTPException(409, "A análise precisa estar concluída para refazer somente os documentos.")
-    workspace = JOBS_DIR / job_id
-    report_path = workspace / "relatorio.json"
-    transcript_path = workspace / "transcricao.json"
-    if not report_path.exists() or not transcript_path.exists():
-        raise HTTPException(409, "Os insumos deste trabalho não estão disponíveis para gerar os novos documentos.")
+    availability = input_availability(item)
+    if not availability["can_rebuild"]:
+        raise HTTPException(409, availability["rebuild_unavailable_reason"])
     try:
-        old_report = json.loads(report_path.read_text(encoding="utf-8"))
-        transcript = json.loads(transcript_path.read_text(encoding="utf-8"))
-        raw_analysis_path = workspace / "analise-visual.json"
-        steps = json.loads(raw_analysis_path.read_text(encoding="utf-8")) if raw_analysis_path.exists() else (old_report.get("evidence_steps") or old_report.get("steps") or [])
-        if not raw_analysis_path.exists():
-            raw_analysis_path.write_text(json.dumps(steps, ensure_ascii=False, indent=2), encoding="utf-8")
-        result = item.get("result_json") or {}
-        if isinstance(result, str):
-            result = json.loads(result)
-        if not isinstance(result, dict):
-            result = {}
-        video = Path(result.get("video") or item["source_path"])
-        source_videos = [Path(path) for path in result.get("source_files") or [video]]
-        documentation = synthesize_documentation(item, steps, transcript, workspace)
-        preview, source_previews = create_job_previews(video, source_videos, steps, workspace, documentation.get("preview_moments", []))
-        write_report(item, steps, workspace, video, documentation, source_previews)
-        create_package(workspace)
-        result["process_step_count"] = len(documentation.get("process_flow", []))
-        result["preview"] = preview
-        result["previews"] = source_previews
-        result["deliverables"] = [
-            "relatorio.html", "documentacao-processo.docx", "documentacao-processo.pdf", "procedimento-operacional.md",
-            "requisitos-rpa.md", "matriz-evidencias.csv", "documentacao-processo.json", "previews separados", "roteiro-cortes.json",
-        ]
-        db.update(job_id, result_json=result)
-        db.event(job_id, "success", "Documentos e preview revisados por relevância contextual do assunto, sem repetir a transcrição.")
-        return enrich(db.get_job(job_id))
-    except Exception as error:
-        raise HTTPException(500, f"Não foi possível revisar os documentos e cortes: {error}") from error
+        return enrich(db.enqueue_rebuild(job_id))
+    except ValueError as error:
+        raise HTTPException(409, "Este trabalho já está na fila ou em processamento.") from error
 
 
 @app.get("/api/jobs/{job_id}/{filename}")
 def deliverable(job_id: str, filename: str):
     allowed = {
         "documentacao-processo.docx", "procedimento-operacional.md", "requisitos-rpa.md",
-        "matriz-evidencias.csv", "documentacao-processo.json",
+        "matriz-evidencias.csv", "documentacao-processo.json", "roteiro-cortes.json", "transcricao.json",
     }
     if filename not in allowed or not db.get_job(job_id):
         raise HTTPException(404, "Entregável não encontrado")

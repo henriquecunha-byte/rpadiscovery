@@ -4,6 +4,7 @@ import base64
 import csv
 from html import escape
 import json
+import math
 import os
 import re
 import subprocess
@@ -18,6 +19,7 @@ from .config import FFMPEG, FFPROBE
 
 
 VIDEO_EXTENSIONS = {".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v"}
+EXPORT_TYPOGRAPHY_NOTE = "Compatibilidade: Word em Arial e PDF em Helvetica; as cores seguem a identidade Btime."
 
 
 def find_videos(source: Path) -> list[Path]:
@@ -35,36 +37,63 @@ def prepare_source(source: Path, workspace: Path) -> tuple[Path, list[Path]]:
     if len(videos) == 1:
         return videos[0], videos
     normalized_dir = workspace / "fontes-normalizadas"
-    normalized_dir.mkdir(exist_ok=True)
+    normalized_dir.mkdir(parents=True, exist_ok=True)
     normalized = []
     for index, video in enumerate(videos, 1):
         output = normalized_dir / f"fonte-{index:03d}.mp4"
-        completed = subprocess.run([
-            FFMPEG, "-y", "-i", str(video), "-map", "0:v:0", "-map", "0:a?",
+        duration = probe_duration(video)
+        media = probe_media(video)
+        if not any(stream.get("codec_type") == "video" for stream in media.get("streams", [])):
+            raise ValueError(f"A gravação {video.name} não contém uma faixa de vídeo.")
+        has_audio = any(stream.get("codec_type") == "audio" for stream in media.get("streams", []))
+        command = [FFMPEG, "-hide_banner", "-loglevel", "error", "-y", "-i", str(video)]
+        if not has_audio:
+            command += ["-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo"]
+        # Stacks can mix resolutions, frame rates, mono audio and silent clips.
+        # The concat demuxer needs identical geometry, stream layout and time base.
+        command += [
+            "-map", "0:v:0", "-map", "0:a:0" if has_audio else "1:a:0",
+            "-vf", "scale=1280:720:force_original_aspect_ratio=decrease:force_divisible_by=2,pad=1280:720:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30",
             "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-pix_fmt", "yuv420p",
-            "-c:a", "aac", "-b:a", "128k", "-ar", "48000", "-movflags", "+faststart", str(output),
-        ], capture_output=True, text=True, check=False)
+            "-c:a", "aac", "-b:a", "128k", "-ar", "48000", "-ac", "2", "-af", "apad",
+            "-t", f"{duration:.6f}", "-video_track_timescale", "90000", "-movflags", "+faststart", str(output),
+        ]
+        completed = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace", check=False)
         if completed.returncode != 0:
             raise RuntimeError(f"Não foi possível preparar a gravação {video.name}: {completed.stderr[-800:]}")
-        normalized.append(output)
+        normalized.append((output, duration))
     concat_list = normalized_dir / "concat.txt"
-    concat_list.write_text("\n".join(f"file '{item.as_posix()}'" for item in normalized), encoding="utf-8")
+    # Relative generated names support workspace paths containing apostrophes.
+    # Explicit durations avoid accumulating AAC padding between source videos.
+    concat_list.write_text("\n".join(f"file '{item.name}'\nduration {duration:.6f}" for item, duration in normalized), encoding="utf-8")
     combined = workspace / "gravacao-consolidada.mp4"
     completed = subprocess.run([
         FFMPEG, "-y", "-f", "concat", "-safe", "0", "-i", str(concat_list),
         "-c", "copy", "-movflags", "+faststart", str(combined),
-    ], capture_output=True, text=True, check=False)
+    ], capture_output=True, text=True, encoding="utf-8", errors="replace", check=False)
     if completed.returncode != 0:
         raise RuntimeError(f"Não foi possível consolidar as gravações: {completed.stderr[-800:]}")
     return combined, videos
 
 
 def probe_duration(video: Path) -> float:
-    completed = subprocess.run([FFPROBE, "-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1:nk=1", str(video)], capture_output=True, text=True, check=True)
-    return float(completed.stdout.strip())
+    completed = subprocess.run([FFPROBE, "-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1:nk=1", str(video)], capture_output=True, text=True, encoding="utf-8", errors="replace", check=True)
+    duration = float(completed.stdout.strip())
+    if not math.isfinite(duration) or duration <= 0:
+        raise ValueError(f"A gravação {video.name} não possui uma duração válida.")
+    return duration
+
+
+def probe_media(video: Path) -> dict:
+    completed = subprocess.run([
+        FFPROBE, "-v", "error", "-show_streams", "-show_format", "-of", "json", str(video),
+    ], capture_output=True, text=True, encoding="utf-8", errors="replace", check=True)
+    return json.loads(completed.stdout)
 
 
 def extract_evidence(video: Path, output: Path, interval: float = 20.0) -> list[dict]:
+    if not math.isfinite(interval) or interval <= 0:
+        raise ValueError("O intervalo de captura deve ser maior que zero.")
     duration = probe_duration(video)
     output.mkdir(parents=True, exist_ok=True)
     timestamps = [index * interval for index in range(max(1, int(duration // interval) + 1)) if index * interval < duration]
@@ -76,7 +105,7 @@ def extract_evidence(video: Path, output: Path, interval: float = 20.0) -> list[
             FFMPEG, "-hide_banner", "-loglevel", "error", "-y", "-ss", f"{timestamp:.3f}",
             "-i", str(video), "-frames:v", "1", "-vf", "scale='min(1280,iw)':-2",
             "-q:v", "3", "-threads", "1", str(output / filename),
-        ], capture_output=True, text=True, check=False)
+        ], capture_output=True, text=True, encoding="utf-8", errors="replace", check=False)
         if completed.returncode != 0 or not (output / filename).exists():
             return None
         return {"index": index, "time": round(timestamp, 3), "image": filename}
@@ -114,6 +143,7 @@ def transcribe(video: Path, workspace: Path) -> list[dict]:
             word_timestamps=False,
         )
         result = [{"start": round(item.start, 3), "end": round(item.end, 3), "text": item.text.strip()} for item in segments]
+        (workspace / "transcricao-aviso.txt").unlink(missing_ok=True)
     except Exception as error:
         (workspace / "transcricao-aviso.txt").write_text(f"Transcrição indisponível: {error}", encoding="utf-8")
         result = []
@@ -153,8 +183,15 @@ def analyze(evidence: list[dict], transcript: list[dict], workspace: Path, conte
             text = text[text.find("{"):text.rfind("}") + 1]
         payload = json.loads(text)
         batch_steps = []
-        for step in payload.get("steps", []):
-            frame = next((item for item in batch if item["index"] == step.get("frame_index")), batch[0])
+        if not isinstance(payload, dict) or not isinstance(payload.get("steps"), list):
+            raise ValueError("A análise visual não retornou uma lista válida de etapas.")
+        for step in payload["steps"]:
+            if not isinstance(step, dict):
+                continue
+            frame = next((item for item in batch if str(item["index"]) == str(step.get("frame_index"))), None)
+            if frame is None:
+                continue
+            step["frame_index"] = frame["index"]
             step |= {"time": frame["time"], "timecode": format_time(frame["time"]), "image": frame["image"], "transcript": nearby_transcript(transcript, frame["time"])}
             batch_steps.append(step)
         return batch_steps
@@ -187,8 +224,8 @@ def fallback_documentation(job: dict, steps: list[dict], warning: str = "") -> d
     if warning:
         limitations.append(f"A síntese automática não pôde ser concluída: {warning}")
     return {
-        "executive_summary": job.get("process_context") or f"Processo {job.get('title', '')} documentado a partir da gravação de discovery.",
-        "objective": job.get("process_context") or "Objetivo não explicitado na gravação.",
+        "executive_summary": "Registro preliminar das etapas observadas. A síntese do processo e seus requisitos precisam de validação antes do uso operacional.",
+        "objective": "Objetivo de negócio não confirmado. Validar com o responsável pelo processo.",
         "scope": {"in_scope": [], "out_of_scope": []},
         "actors": [],
         "systems": [{"name": name, "purpose": "Finalidade não explicitada."} for name in systems],
@@ -229,6 +266,26 @@ def normalize_documentation(document, job: dict, steps: list[dict]) -> dict:
     for key in list_fields:
         if not isinstance(document.get(key), list):
             document[key] = baseline[key]
+    # Model JSON can be valid JSON but still violate the document schema. Keep
+    # usable facts and prevent a malformed list item from breaking every export.
+    object_fields = ("actors", "systems", "inputs", "outputs", "business_rules", "process_flow",
+                     "exceptions", "risks_and_controls", "automation_opportunities", "preview_moments")
+    for key in object_fields:
+        document[key] = [dict(item) for item in document[key] if isinstance(item, dict) and item]
+    for key in ("prerequisites", "open_questions", "limitations"):
+        document[key] = [item.strip() for item in document[key] if isinstance(item, str) and item.strip()]
+    for key in ("in_scope", "out_of_scope"):
+        scope[key] = [item.strip() for item in scope[key] if isinstance(item, str) and item.strip()]
+    known_refs = {str(item["frame_index"]) for item in steps if item.get("frame_index") is not None}
+    for key in object_fields:
+        for item in document[key]:
+            for field, value in list(item.items()):
+                if field == "evidence_refs":
+                    item[field] = [ref for ref in value if str(ref) in known_refs] if isinstance(value, list) else []
+                elif isinstance(value, (dict, list)):
+                    item[field] = ""
+            if key in ("business_rules", "process_flow"):
+                item.setdefault("evidence_refs", [])
     if not document["process_flow"]:
         document["process_flow"] = baseline["process_flow"]
     return document
@@ -383,10 +440,19 @@ def format_time(seconds: float) -> str:
 
 
 def parse_timecode(value) -> float:
+    if isinstance(value, bool):
+        raise ValueError(f"Timecode inválido: {value}")
     if isinstance(value, (int, float)):
-        return float(value)
+        seconds = float(value)
+        if not math.isfinite(seconds) or seconds < 0:
+            raise ValueError(f"Timecode inválido: {value}")
+        return seconds
     parts = str(value or "").strip().split(":")
-    if not parts or any(not part.replace(".", "", 1).isdigit() for part in parts):
+    if len(parts) > 3 or any(not part.replace(".", "", 1).isdigit() for part in parts):
+        raise ValueError(f"Timecode inválido: {value}")
+    if len(parts) > 1 and (any(not part.isdigit() for part in parts[:-1]) or float(parts[-1]) >= 60):
+        raise ValueError(f"Timecode inválido: {value}")
+    if len(parts) == 3 and int(parts[1]) >= 60:
         raise ValueError(f"Timecode inválido: {value}")
     seconds = 0.0
     for part in parts:
@@ -408,18 +474,20 @@ def preview_ranges(steps: list[dict], duration: float, before: float = 6.0, afte
     return ranges
 
 
-def preview_ranges_from_moments(moments: list[dict], duration: float, before: float = 4.0, after: float = 6.0, merge_gap: float = 20.0) -> list[tuple[float, float]]:
+def preview_ranges_from_moments(moments: list[dict], duration: float, before: float = 4.0, after: float = 6.0, merge_gap: float = 0.0) -> list[tuple[float, float]]:
     ranges = []
     for moment in moments or []:
         if not isinstance(moment, dict):
             continue
         try:
-            start = max(0.0, parse_timecode(moment.get("start")) - before)
-            end = min(duration, parse_timecode(moment.get("end")) + after)
+            raw_start = parse_timecode(moment.get("start"))
+            raw_end = parse_timecode(moment.get("end"))
         except (TypeError, ValueError):
             continue
-        if end - start < 3.0:
+        if raw_end <= raw_start or raw_start >= duration:
             continue
+        start = max(0.0, raw_start - before)
+        end = min(duration, raw_end + after)
         ranges.append((start, end))
     merged = []
     for start, end in sorted(ranges):
@@ -433,12 +501,14 @@ def preview_ranges_from_moments(moments: list[dict], duration: float, before: fl
 def build_preview_plan(video: Path, steps: list[dict], moments: list[dict] | None = None) -> dict:
     duration = probe_duration(video)
     spoken_ranges = preview_ranges_from_moments(moments or [], duration)
-    ranges = spoken_ranges or preview_ranges(steps, duration)
+    # An explicit empty contextual selection means no relevant speech, not
+    # permission to include unrelated screen changes. None is legacy-only.
+    ranges = spoken_ranges if moments is not None else preview_ranges(steps, duration)
     return {
         "created": bool(ranges),
         "duration": round(sum(end - start for start, end in ranges), 3),
         "ranges": [{"start": round(start, 3), "end": round(end, 3)} for start, end in ranges],
-        "selection_basis": "contextual_spoken_content" if spoken_ranges else ("visual_evidence_fallback" if ranges else "none"),
+        "selection_basis": "contextual_spoken_content" if moments is not None else ("visual_evidence_fallback" if ranges else "none"),
         "moments": moments or [],
     }
 
@@ -447,6 +517,7 @@ def render_preview(video: Path, ranges: list[tuple[float, float]], workspace: Pa
     output_path.parent.mkdir(parents=True, exist_ok=True)
     plan_path.parent.mkdir(parents=True, exist_ok=True)
     if not ranges:
+        output_path.unlink(missing_ok=True)
         result = {"created": False, "duration": 0, "ranges": [], "selection_basis": selection_basis, "moments": moments or [], "file": None}
         plan_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
         return result
@@ -456,20 +527,20 @@ def render_preview(video: Path, ranges: list[tuple[float, float]], workspace: Pa
     for index, (start, end) in enumerate(ranges, 1):
         segment = segments_dir / f"segment-{index:03d}.mp4"
         completed = subprocess.run([
-            FFMPEG, "-y", "-ss", f"{start:.3f}", "-to", f"{end:.3f}", "-i", str(video),
-            "-map", "0:v:0", "-map", "0:a?", "-vf", "scale='min(1280,iw)':-2",
-            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "27", "-c:a", "aac",
+            FFMPEG, "-y", "-ss", f"{start:.3f}", "-i", str(video), "-t", f"{end - start:.3f}",
+            "-map", "0:v:0", "-map", "0:a:0?", "-vf", "scale='min(1280,trunc(iw/2)*2)':-2",
+            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "27", "-pix_fmt", "yuv420p", "-c:a", "aac",
             "-b:a", "96k", "-movflags", "+faststart", str(segment),
-        ], capture_output=True, text=True, check=False)
+        ], capture_output=True, text=True, encoding="utf-8", errors="replace", check=False)
         if completed.returncode != 0:
             raise RuntimeError(f"Não foi possível montar o trecho {index} do preview: {completed.stderr[-800:]}")
         segments.append(segment)
     concat_list = segments_dir / "concat.txt"
-    concat_list.write_text("\n".join(f"file '{item.as_posix()}'" for item in segments), encoding="utf-8")
+    concat_list.write_text("\n".join(f"file '{item.name}'\nduration {end - start:.6f}" for item, (start, end) in zip(segments, ranges)), encoding="utf-8")
     completed = subprocess.run([
         FFMPEG, "-y", "-f", "concat", "-safe", "0", "-i", str(concat_list),
         "-c", "copy", "-movflags", "+faststart", str(output_path),
-    ], capture_output=True, text=True, check=False)
+    ], capture_output=True, text=True, encoding="utf-8", errors="replace", check=False)
     if completed.returncode != 0:
         raise RuntimeError(f"Não foi possível finalizar o preview: {completed.stderr[-800:]}")
     result = {
@@ -500,7 +571,8 @@ def create_job_previews(analysis_video: Path, source_videos: list[Path], steps: 
     if len(source_videos) == 1:
         preview = create_preview(analysis_video, steps, workspace, moments)
         source_preview = dict(preview)
-        source_preview |= {"index": 1, "source_name": source_videos[0].name, "source_path": str(source_videos[0])}
+        source_preview |= {"index": 1, "source_name": source_videos[0].name, "source_path": str(source_videos[0]), "global_offset": 0.0}
+        (workspace / "roteiro-cortes.json").write_text(json.dumps(source_preview, ensure_ascii=False, indent=2), encoding="utf-8")
         return preview, [source_preview]
 
     plan = build_preview_plan(analysis_video, steps, moments)
@@ -514,7 +586,7 @@ def create_job_previews(analysis_video: Path, source_videos: list[Path], steps: 
         for start, end in global_ranges:
             local_start = max(start, offset)
             local_end = min(end, source_end)
-            if local_end - local_start >= 3.0:
+            if local_end - local_start > 0.05:
                 local_ranges.append((local_start - offset, local_end - offset))
         slug = preview_slug(source, index)
         source_preview = render_preview(
@@ -532,7 +604,9 @@ def create_job_previews(analysis_video: Path, source_videos: list[Path], steps: 
             "source_path": str(source),
             "source_duration": round(source_duration, 3),
             "global_offset": round(offset, 3),
+            "moments_timeline": "consolidated",
         }
+        (workspace / "roteiros" / f"{slug}-cortes.json").write_text(json.dumps(source_preview, ensure_ascii=False, indent=2), encoding="utf-8")
         source_previews.append(source_preview)
         offset = source_end
 
@@ -545,14 +619,28 @@ def create_job_previews(analysis_video: Path, source_videos: list[Path], steps: 
 
 def create_package(workspace: Path):
     package = workspace / "entrega-completa.zip"
+    temporary = workspace / "entrega-completa.zip.tmp"
     included = [
         "relatorio.html", "relatorio.json", "documentacao-processo.json",
         "documentacao-processo.docx", "documentacao-processo.pdf", "procedimento-operacional.md", "requisitos-rpa.md", "matriz-evidencias.csv",
         "transcricao.json", "preview-processo.mp4", "roteiro-cortes.json", "transcricao-aviso.txt", "documentacao-aviso.txt", "documentacao-pdf-aviso.txt",
     ]
-    with zipfile.ZipFile(package, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
+    current_files = None
+    plan_path = workspace / "roteiro-cortes.json"
+    if plan_path.exists():
+        plan = json.loads(plan_path.read_text(encoding="utf-8"))
+        current_files = set()
+        previews = plan.get("previews", [plan])
+        for item in previews:
+            if item.get("created") and item.get("file"):
+                current_files.add(item["file"])
+            if item.get("index") and item.get("source_name"):
+                current_files.add(f"roteiros/{preview_slug(Path(item['source_name']), item['index'])}-cortes.json")
+    with zipfile.ZipFile(temporary, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
         for name in included:
             path = workspace / name
+            if name == "preview-processo.mp4" and current_files is not None and name not in current_files:
+                continue
             if path.exists():
                 compression = zipfile.ZIP_STORED if path.suffix.lower() == ".mp4" else zipfile.ZIP_DEFLATED
                 archive.write(path, arcname=name, compress_type=compression)
@@ -560,9 +648,10 @@ def create_package(workspace: Path):
             archive.write(path, arcname=f"evidence/{path.name}", compress_type=zipfile.ZIP_STORED)
         for folder in ("previews", "roteiros"):
             for path in sorted((workspace / folder).glob("*")):
-                if path.is_file():
+                if path.is_file() and (current_files is None or f"{folder}/{path.name}" in current_files):
                     compression = zipfile.ZIP_STORED if path.suffix.lower() == ".mp4" else zipfile.ZIP_DEFLATED
                     archive.write(path, arcname=f"{folder}/{path.name}", compress_type=compression)
+    temporary.replace(package)
 
 
 def markdown_value(value) -> str:
@@ -581,10 +670,13 @@ def write_docx_document(job: dict, document: dict, workspace: Path):
         (workspace / "documentacao-aviso.txt").write_text(f"Documento Word indisponível: {error}", encoding="utf-8")
         return
 
-    navy = RGBColor(16, 45, 70)
-    teal = RGBColor(22, 141, 138)
-    muted = RGBColor(84, 112, 134)
+    navy = RGBColor.from_string("060315")
+    teal = RGBColor.from_string("571EE6")
+    muted = RGBColor.from_string("62596F")
     word = Document()
+    word.core_properties.title = str(job.get("title") or "Processo")
+    word.core_properties.subject = "Documentação pós-discovery de RPA"
+    word.core_properties.author = "Btime RPA Docs"
     section = word.sections[0]
     section.page_width = Inches(8.5)
     section.page_height = Inches(11)
@@ -592,9 +684,9 @@ def write_docx_document(job: dict, document: dict, workspace: Path):
     section.header_distance = section.footer_distance = Inches(0.492)
 
     def set_font(run, size=None, color=None, bold=None, italic=None):
-        run.font.name = "Calibri"
-        run._element.get_or_add_rPr().rFonts.set(qn("w:ascii"), "Calibri")
-        run._element.get_or_add_rPr().rFonts.set(qn("w:hAnsi"), "Calibri")
+        run.font.name = "Arial"
+        run._element.get_or_add_rPr().rFonts.set(qn("w:ascii"), "Arial")
+        run._element.get_or_add_rPr().rFonts.set(qn("w:hAnsi"), "Arial")
         if size is not None:
             run.font.size = Pt(size)
         if color is not None:
@@ -605,7 +697,8 @@ def write_docx_document(job: dict, document: dict, workspace: Path):
             run.italic = italic
 
     normal = word.styles["Normal"]
-    normal.font.name = "Calibri"
+    normal.font.name = "Arial"
+    normal.font.color.rgb = navy
     normal.font.size = Pt(11)
     normal.paragraph_format.space_after = Pt(6)
     normal.paragraph_format.line_spacing = 1.25
@@ -613,7 +706,7 @@ def write_docx_document(job: dict, document: dict, workspace: Path):
         ("Heading 1", 16, navy, 18, 10), ("Heading 2", 13, navy, 14, 7), ("Heading 3", 12, muted, 10, 5),
     ):
         style = word.styles[name]
-        style.font.name = "Calibri"
+        style.font.name = "Arial"
         style.font.size = Pt(size)
         style.font.color.rgb = color
         style.font.bold = True
@@ -629,12 +722,16 @@ def write_docx_document(job: dict, document: dict, workspace: Path):
     footer.text = str(job.get("title") or "Documento de processo")
     footer.alignment = WD_ALIGN_PARAGRAPH.RIGHT
     set_font(footer.runs[0], 8.5, muted)
+    set_font(footer.add_run(" · página "), 8.5, muted)
+    page_field = OxmlElement("w:fldSimple")
+    page_field.set(qn("w:instr"), "PAGE")
+    footer._p.append(page_field)
 
     kicker = word.add_paragraph()
     kicker.paragraph_format.space_before = Pt(48)
     kicker.paragraph_format.space_after = Pt(8)
     set_font(kicker.add_run("DOCUMENTO DE PROCESSO E REQUISITOS PARA RPA"), 9, teal, True)
-    title = word.add_paragraph()
+    title = word.add_paragraph(style="Title")
     title.paragraph_format.space_after = Pt(10)
     set_font(title.add_run(str(job.get("title") or "Processo")), 28, navy, True)
     subtitle = word.add_paragraph()
@@ -645,6 +742,13 @@ def write_docx_document(job: dict, document: dict, workspace: Path):
     set_font(lead.add_run(str(document.get("executive_summary") or "Não identificado na gravação.")), 13, navy)
     note = word.add_paragraph()
     set_font(note.add_run("Este documento consolida o processo demonstrado. A transcrição e os prints são evidências de apoio e permanecem separados no pacote."), 9.5, muted, italic=True)
+    if job.get("process_context"):
+        guide_heading = word.add_heading("Guia recebido para esta análise", level=2)
+        guide_heading.paragraph_format.space_before = Pt(20)
+        guide = word.add_paragraph(str(job["process_context"]))
+        guide.paragraph_format.space_after = Pt(8)
+        guidance_note = word.add_paragraph()
+        set_font(guidance_note.add_run("Orientação da equipe para documentação e cortes; não equivale a um objetivo de negócio confirmado."), 9, muted, italic=True)
     word.add_page_break()
 
     def heading(text: str, level: int = 1):
@@ -724,7 +828,7 @@ def write_docx_document(job: dict, document: dict, workspace: Path):
             cell = table.rows[0].cells[index]
             cell.width = Inches(width)
             cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
-            shade_cell(cell, "E8EEF5")
+            shade_cell(cell, "F0EAFF")
             set_font(cell.paragraphs[0].add_run(header_text), 9.5, navy, True)
         for values in rows:
             cells = table.add_row().cells
@@ -798,6 +902,7 @@ def write_docx_document(job: dict, document: dict, workspace: Path):
     bullet_items(document.get("open_questions", []), "Nenhum ponto adicional registrado.")
     heading("13. Limitações da análise")
     bullet_items(document.get("limitations", []))
+    set_font(word.add_paragraph().add_run(EXPORT_TYPOGRAPHY_NOTE), 8.5, muted)
     word.save(workspace / "documentacao-processo.docx")
 
 
@@ -812,14 +917,14 @@ def write_pdf_document(job: dict, document: dict, workspace: Path) -> Path | Non
         (workspace / "documentacao-pdf-aviso.txt").write_text(f"Exportação em PDF indisponível: {error}", encoding="utf-8")
         return None
 
-    navy = colors.HexColor("#102d46")
-    teal = colors.HexColor("#168d8a")
-    muted = colors.HexColor("#547086")
-    ink = colors.HexColor("#172b3a")
+    navy = colors.HexColor("#060315")
+    teal = colors.HexColor("#571ee6")
+    muted = colors.HexColor("#62596f")
+    ink = navy
     path = workspace / "documentacao-processo.pdf"
     title_text = str(job.get("title") or "Processo")
 
-    base = ParagraphStyle("Corpo", fontName="Helvetica", fontSize=10.5, leading=15, spaceAfter=6, textColor=ink)
+    base = ParagraphStyle("Corpo", fontName="Helvetica", fontSize=10.5, leading=15, spaceAfter=5, textColor=ink)
     styles = {
         "body": base,
         "kicker": ParagraphStyle("Kicker", parent=base, fontName="Helvetica-Bold", fontSize=9, textColor=teal, spaceAfter=8),
@@ -827,8 +932,8 @@ def write_pdf_document(job: dict, document: dict, workspace: Path) -> Path | Non
         "subtitle": ParagraphStyle("Subtitulo", parent=base, fontSize=10.5, textColor=muted, spaceAfter=22),
         "lead": ParagraphStyle("Abertura", parent=base, fontSize=13, leading=18, textColor=navy, spaceAfter=18),
         "note": ParagraphStyle("Nota", parent=base, fontName="Helvetica-Oblique", fontSize=9.5, textColor=muted),
-        "h1": ParagraphStyle("Titulo1", parent=base, fontName="Helvetica-Bold", fontSize=15, leading=19, textColor=navy, spaceBefore=18, spaceAfter=9, keepWithNext=1),
-        "h2": ParagraphStyle("Titulo2", parent=base, fontName="Helvetica-Bold", fontSize=12, leading=16, textColor=navy, spaceBefore=13, spaceAfter=6, keepWithNext=1),
+        "h1": ParagraphStyle("Titulo1", parent=base, fontName="Helvetica-Bold", fontSize=15, leading=19, textColor=navy, spaceBefore=14, spaceAfter=7, keepWithNext=1),
+        "h2": ParagraphStyle("Titulo2", parent=base, fontName="Helvetica-Bold", fontSize=12, leading=16, textColor=navy, spaceBefore=10, spaceAfter=5, keepWithNext=1),
         "bullet": ParagraphStyle("Marcador", parent=base, leftIndent=16, bulletIndent=4, spaceAfter=4),
         "evidence": ParagraphStyle("Evidencia", parent=base, fontName="Helvetica-Oblique", fontSize=9, textColor=muted, spaceAfter=10),
         "th": ParagraphStyle("Cabecalho", parent=base, fontName="Helvetica-Bold", fontSize=9.5, leading=13, textColor=navy, spaceAfter=0),
@@ -849,15 +954,15 @@ def write_pdf_document(job: dict, document: dict, workspace: Path) -> Path | Non
         data += [[Paragraph(escape(str(value or "Não identificado")), styles["td"]) for value in row] for row in rows]
         table = Table(data, colWidths=[width * inch for width in widths], repeatRows=1, hAlign="LEFT")
         table.setStyle(TableStyle([
-            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#e8eef5")),
-            ("LINEBELOW", (0, 0), (-1, -1), 0.5, colors.HexColor("#dce5eb")),
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#f0eaff")),
+            ("LINEBELOW", (0, 0), (-1, -1), 0.5, colors.HexColor("#e1ddeb")),
             ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
             ("TOPPADDING", (0, 0), (-1, -1), 5),
             ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
             ("LEFTPADDING", (0, 0), (-1, -1), 7),
             ("RIGHTPADDING", (0, 0), (-1, -1), 7),
         ]))
-        return [table, Spacer(1, 10)]
+        return [table, Spacer(1, 8)]
 
     def decorate(canvas, document_template):
         canvas.saveState()
@@ -865,8 +970,12 @@ def write_pdf_document(job: dict, document: dict, workspace: Path) -> Path | Non
         canvas.setFillColor(muted)
         canvas.drawString(inch, LETTER[1] - 0.72 * inch, "BTIME · DOCUMENTAÇÃO PÓS-DISCOVERY DE RPA")
         canvas.setFont("Helvetica", 8.5)
-        canvas.drawRightString(LETTER[0] - inch, 0.62 * inch, f"{title_text} · página {canvas.getPageNumber()}")
-        canvas.setStrokeColor(colors.HexColor("#dce5eb"))
+        footer_title = title_text
+        suffix = f" · página {canvas.getPageNumber()}"
+        while footer_title and canvas.stringWidth(footer_title + suffix, "Helvetica", 8.5) > LETTER[0] - 2 * inch:
+            footer_title = footer_title[:-2].rstrip() + "…" if len(footer_title) > 2 else ""
+        canvas.drawRightString(LETTER[0] - inch, 0.62 * inch, footer_title + suffix)
+        canvas.setStrokeColor(colors.HexColor("#e1ddeb"))
         canvas.line(inch, LETTER[1] - 0.82 * inch, LETTER[0] - inch, LETTER[1] - 0.82 * inch)
         canvas.restoreState()
 
@@ -877,6 +986,11 @@ def write_pdf_document(job: dict, document: dict, workspace: Path) -> Path | Non
         text(f"Público: {job.get('audience') or 'Equipe de RPA'}  |  Nível: {job.get('detail_level') or 'operacional'}", "subtitle"),
         text(document.get("executive_summary"), "lead"),
         text("Este documento consolida o processo demonstrado. A transcrição e os prints são evidências de apoio e permanecem separados no pacote.", "note"),
+        *([
+            text("Guia recebido para esta análise", "h2"),
+            text(job["process_context"]),
+            text("Orientação da equipe para documentação e cortes; não equivale a um objetivo de negócio confirmado.", "note"),
+        ] if job.get("process_context") else []),
         PageBreak(),
         text("1. Objetivo", "h1"),
         text(document.get("objective")),
@@ -959,8 +1073,13 @@ def write_pdf_document(job: dict, document: dict, workspace: Path) -> Path | Non
         story.append(text("Nenhuma oportunidade foi confirmada com os insumos disponíveis."))
     story.append(text("12. Pontos a validar", "h1"))
     story += bullets(document.get("open_questions", []), "Nenhum ponto adicional registrado.")
-    story.append(text("13. Limitações da análise", "h1"))
-    story += bullets(document.get("limitations", []))
+    # Keep a short warning list with its heading, so the last caveat cannot
+    # become an isolated final page. Long lists can still split naturally.
+    story.append(KeepTogether([
+        text("13. Limitações da análise", "h1"),
+        *bullets(document.get("limitations", [])),
+        text(EXPORT_TYPOGRAPHY_NOTE, "note"),
+    ]))
 
     SimpleDocTemplate(
         str(path), pagesize=LETTER, title=title_text, author="Btime RPA Docs",
@@ -974,6 +1093,19 @@ def write_pdf_document(job: dict, document: dict, workspace: Path) -> Path | Non
 def write_structured_files(job: dict, document: dict, steps: list[dict], workspace: Path):
     def bullets(items: list, empty: str = "Não identificado na gravação.") -> str:
         return "\n".join(f"- {item}" for item in items) if items else f"- {empty}"
+
+    guide = str(job.get("process_context") or "Não informado.")
+    limitations = bullets(document.get("limitations", []), "Nenhuma limitação adicional registrada; validar com o responsável antes do uso operacional.")
+    provenance = f'''## Guia recebido para esta análise
+
+{guide}
+
+Orientação da equipe para documentação e cortes; não equivale a um objetivo de negócio confirmado.
+
+## Limitações da análise
+
+{limitations}
+'''
 
     flow_rows = "\n".join(
         f"| {item.get('sequence', index)} | {markdown_value(item.get('title'))} | {markdown_value(item.get('description'))} | {markdown_value(item.get('actor'))} | {markdown_value(item.get('system'))} |"
@@ -1006,6 +1138,8 @@ def write_structured_files(job: dict, document: dict, steps: list[dict], workspa
 ## Pontos a validar
 
 {bullets(document.get("open_questions", []), "Nenhum ponto adicional registrado.")}
+
+{provenance}
 '''
     (workspace / "procedimento-operacional.md").write_text(procedure, encoding="utf-8")
 
@@ -1047,6 +1181,8 @@ def write_structured_files(job: dict, document: dict, steps: list[dict], workspa
 ## Dúvidas e dependências para refinamento
 
 {bullets(document.get("open_questions", []))}
+
+{provenance}
 '''
     (workspace / "requisitos-rpa.md").write_text(requirements, encoding="utf-8")
     write_docx_document(job, document, workspace)
@@ -1092,6 +1228,43 @@ def locate_in_preview(source_previews: list[dict] | None, moment: float, lead_in
                 }
             elapsed += end - start
     return None
+
+
+def report_styles() -> str:
+    """Self-contained offline report: official local fonts, no external requests."""
+    fonts = []
+    font_dir = Path(__file__).parent / "static" / "btime" / "fontes"
+    for name, weight in (("Semilight", "300 400"), ("Medium", "500"), ("Semibold", "600 800")):
+        path = font_dir / f"Branding-{name}.woff"
+        if path.is_file():
+            encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+            fonts.append(f"@font-face{{font-family:Branding;src:url(data:font/woff;base64,{encoded}) format('woff');font-weight:{weight};font-display:swap}}")
+    return "\n".join(fonts) + '''
+:root{--night:#060315;--violet:#571ee6;--lavender:#d5c5ff;--paper:#f7f6fb;--muted:#62596f;--divider:#e1ddeb}
+*{box-sizing:border-box}body{font:17px/1.55 Branding,Arial,sans-serif;margin:0;background:var(--paper);color:var(--night)}
+header{padding:46px max(5vw,24px);background:var(--night);color:white}header p{max-width:850px}
+h1{font-size:clamp(30px,4vw,44px);line-height:1.15;letter-spacing:-.025em;max-width:1000px;overflow-wrap:anywhere}
+h2{margin-top:0;line-height:1.25;font-size:25px}h3{margin:5px 0;line-height:1.3}main{max-width:1120px;margin:30px auto;padding:0 20px}
+section{margin:22px 0}.panel{background:white;padding:24px;border:1px solid var(--divider);border-radius:12px;min-width:0;overflow-x:auto}
+.summary{font-size:21px;max-width:900px}.request-guide p{white-space:pre-wrap}.request-guide small{color:var(--muted)}
+.deliverables{display:flex;flex-wrap:wrap;gap:8px;margin-top:20px}a{color:var(--violet);text-underline-offset:3px}a:hover{text-decoration:underline}
+a:focus-visible,summary:focus-visible,video:focus-visible{outline:3px solid var(--violet);outline-offset:4px}header a:focus-visible,.preview a:focus-visible{outline-color:var(--lavender)}
+.deliverables a,.evidence-ref{font-weight:600;text-decoration:none}.deliverables a{display:inline-flex;align-items:center;min-height:44px;padding:9px 12px;background:var(--lavender);color:var(--night);border-radius:8px}
+.preview{background:var(--night);color:white;padding:24px;border-radius:12px}.preview a{color:var(--lavender)}.preview article+article{margin-top:28px;padding-top:20px;border-top:1px solid #817990}
+video{display:block;width:100%;max-height:620px;margin-top:14px;background:#000;border-radius:8px}.columns{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:18px}
+.entity-list{list-style:none;padding:0}.entity-list li{display:flex;flex-direction:column;padding:10px 0;border-bottom:1px solid var(--divider)}
+.flow-step{display:grid;grid-template-columns:48px minmax(0,1fr);gap:15px;background:white;margin:12px 0;padding:20px;border:1px solid var(--divider);border-radius:12px;border-left:4px solid var(--violet)}
+.flow-step>b{display:grid;place-items:center;width:38px;height:38px;border-radius:8px;background:var(--violet);color:white}.flow-step footer{display:flex;flex-wrap:wrap;gap:7px;margin-top:12px}
+.evidence-ref{display:inline-flex;align-items:center;min-height:44px;padding:5px 10px;background:#f0eaff;border-radius:8px;font-size:14px}.not-confirmed,.empty{color:var(--muted);font-style:italic}
+table{width:100%;border-collapse:collapse;background:white}th,td{padding:11px;text-align:left;border-bottom:1px solid var(--divider);vertical-align:top;overflow-wrap:anywhere}th{background:#f0eaff}
+.rules li{margin:9px 0}.opportunities{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(240px,100%),1fr));gap:12px}.opportunity{background:#f0eaff;padding:20px;border-radius:12px}
+.evidence-card{display:grid;grid-template-columns:42% minmax(0,1fr);gap:22px;background:white;margin:15px 0;padding:20px;border:1px solid var(--divider);border-radius:12px}
+.evidence-card img{width:100%;border-radius:8px;border:1px solid var(--divider)}.evidence-media{min-width:0}.evidence-media video{margin-top:0;max-height:none;border:1px solid var(--divider)}
+.evidence-media small{display:block;margin-top:8px;color:var(--muted);font-size:13px}span,dt{color:var(--muted);font-size:14px;font-weight:600}
+dl{display:grid;grid-template-columns:150px minmax(0,1fr);gap:7px 12px}dd{margin:0}details{margin-top:12px}summary{padding:10px 0;min-height:44px;cursor:pointer}p,li,dd,h3{overflow-wrap:anywhere}
+@media(max-width:760px){.columns,.evidence-card{grid-template-columns:1fr}.flow-step{grid-template-columns:38px minmax(0,1fr);gap:12px;padding:16px}dl{grid-template-columns:1fr}main{padding:0 16px}.panel{padding:20px}header{padding:32px 20px}}
+@media print{body{background:white;font-size:11pt}header{background:white;color:var(--night);padding:0 0 20px}.deliverables,.preview,video{display:none}main{max-width:none;margin:0;padding:0}.panel,.flow-step,.evidence-card{box-shadow:none;break-inside:avoid}.columns{display:block}a{color:inherit}}
+'''
 
 
 def write_report(job: dict, steps: list[dict], workspace: Path, video: Path, document: dict | None = None, source_previews: list[dict] | None = None):
@@ -1176,7 +1349,12 @@ def write_report(job: dict, steps: list[dict], workspace: Path, video: Path, doc
         preview = '<section class="preview"><h2>Preview do processo</h2><p>Trechos selecionados principalmente pelo conteúdo falado; os frames confirmam e ilustram cada explicação relevante.</p><video controls preload="metadata" src="preview-processo.mp4"></video><p><a href="preview-processo.mp4" target="_blank">Abrir preview em nova aba</a> · <a href="preview-processo.mp4" download>Baixar preview</a></p></section>'
     else:
         preview = ""
-    html = f'''<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>{safe(job['title'])}</title><style>:root{{--navy:#102d46;--teal:#168d8a;--ink:#172b3a;--muted:#61798a}}*{{box-sizing:border-box}}body{{font:15px/1.55 Arial;margin:0;background:#f3f5f7;color:var(--ink)}}header{{padding:46px max(5vw,24px);background:var(--navy);color:white}}header p{{max-width:850px}}main{{max-width:1120px;margin:30px auto;padding:0 20px}}section{{margin:22px 0}}.panel{{background:white;padding:24px;border-radius:14px;box-shadow:0 4px 20px #1231}}.summary{{font-size:18px;max-width:900px}}.deliverables{{display:flex;flex-wrap:wrap;gap:8px;margin-top:20px}}.deliverables a,.preview a,.evidence-ref{{color:var(--teal);font-weight:bold;text-decoration:none}}.deliverables a{{padding:9px 12px;background:#e8f5f4;border-radius:8px}}.preview{{background:var(--navy);color:white;padding:22px;border-radius:14px}}video{{display:block;width:100%;max-height:620px;margin-top:14px;background:#000;border-radius:9px}}.columns{{display:grid;grid-template-columns:1fr 1fr;gap:18px}}.entity-list{{list-style:none;padding:0}}.entity-list li{{display:flex;flex-direction:column;padding:10px 0;border-bottom:1px solid #e1e8ed}}.flow-step{{display:grid;grid-template-columns:48px 1fr;gap:15px;background:white;margin:12px 0;padding:20px;border-radius:12px;border-left:4px solid var(--teal)}}.flow-step>b{{display:grid;place-items:center;width:38px;height:38px;border-radius:50%;background:var(--navy);color:white}}.flow-step footer{{display:flex;flex-wrap:wrap;gap:7px;margin-top:12px}}.evidence-ref{{padding:5px 8px;background:#e8f5f4;border-radius:7px;font-size:12px}}.not-confirmed,.empty{{color:var(--muted);font-style:italic}}table{{width:100%;border-collapse:collapse;background:white}}th,td{{padding:11px;text-align:left;border-bottom:1px solid #dce5eb;vertical-align:top}}th{{background:#eaf0f4}}.rules li{{margin:9px 0}}.opportunities{{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px}}.opportunity{{background:#e8f5f4;padding:16px;border-radius:10px}}.evidence-card{{display:grid;grid-template-columns:42% 1fr;gap:22px;background:white;margin:15px 0;padding:18px;border-radius:14px}}.evidence-card img{{width:100%;border-radius:8px;border:1px solid #ccd4dc}}.evidence-media{{min-width:0}}.evidence-media video{{margin-top:0;max-height:none;border:1px solid #ccd4dc;border-radius:8px}}.evidence-media small{{display:block;margin-top:8px;color:#547086;font-size:11px;font-weight:bold}}span,dt{{color:#547086;font-size:12px;font-weight:bold}}h2{{margin-top:0}}h3{{margin:5px 0}}dl{{display:grid;grid-template-columns:150px 1fr;gap:7px 12px}}dd{{margin:0}}details{{margin-top:12px}}@media(max-width:760px){{.columns,.evidence-card{{grid-template-columns:1fr}}.flow-step{{grid-template-columns:38px 1fr}}dl{{grid-template-columns:1fr}}}}</style></head><body><header><small>DOCUMENTAÇÃO ESTRUTURADA PÓS-DISCOVERY DE RPA</small><h1>{safe(job['title'])}</h1><p>Público: {safe(job.get('audience'))} · Nível: {safe(job.get('detail_level'))}</p><nav class="deliverables"><a href="documentacao-processo.docx" download>Documento Word editável</a><a href="documentacao-processo.pdf" download>Documento PDF</a><a href="procedimento-operacional.md" download>Procedimento operacional</a><a href="requisitos-rpa.md" download>Requisitos para RPA</a><a href="matriz-evidencias.csv" download>Matriz de evidências</a><a href="documentacao-processo.json" download>Dados estruturados</a></nav></header><main><section class="panel"><small>VISÃO GERAL</small><h2>Resumo executivo</h2><p class="summary">{safe(document.get('executive_summary'))}</p><h3>Objetivo</h3><p>{safe(document.get('objective'))}</p></section><section class="columns"><div class="panel"><h2>Escopo incluído</h2>{list_html(document.get('scope', {}).get('in_scope', []))}</div><div class="panel"><h2>Fora do escopo</h2>{list_html(document.get('scope', {}).get('out_of_scope', []))}</div></section><section class="columns"><div class="panel"><h2>Atores e responsabilidades</h2><ul class="entity-list">{actors}</ul></div><div class="panel"><h2>Sistemas envolvidos</h2><ul class="entity-list">{systems}</ul></div></section><section class="panel"><h2>Pré-requisitos</h2>{list_html(document.get('prerequisites', []))}</section><section class="columns"><div class="panel"><h2>Entradas</h2><table><thead><tr><th>Entrada</th><th>Origem</th><th>Obrigatoriedade</th></tr></thead><tbody>{input_rows}</tbody></table></div><div class="panel"><h2>Saídas</h2><table><thead><tr><th>Saída</th><th>Destino</th></tr></thead><tbody>{output_rows}</tbody></table></div></section><section><small>PROCESSO ATUAL</small><h2>Fluxo operacional consolidado</h2>{flow_cards or '<p class="empty">Nenhuma etapa foi identificada.</p>'}</section><section class="panel"><h2>Regras de negócio</h2><ol class="rules">{rules}</ol></section><section class="panel"><h2>Exceções e tratamentos</h2><table><thead><tr><th>Cenário</th><th>Tratamento</th><th>Status</th></tr></thead><tbody>{exceptions}</tbody></table></section><section class="panel"><h2>Riscos e controles</h2><table><thead><tr><th>Risco</th><th>Impacto</th><th>Controle</th></tr></thead><tbody>{risks}</tbody></table></section><section><h2>Oportunidades de automação</h2><div class="opportunities">{opportunities}</div></section><section class="columns"><div class="panel"><h2>Pontos a validar</h2>{list_html(document.get('open_questions', []), 'Nenhum ponto adicional registrado.')}</div><div class="panel"><h2>Limitações desta análise</h2>{list_html(document.get('limitations', []))}</div></section>{preview}<section><small>ANEXO DE COMPROVAÇÃO</small><h2>Matriz visual e falas relacionadas</h2><p>Cada evidência abre o corte em que o assunto é falado, começando pouco antes do print e seguindo até o fim do trecho. As evidências sustentam a documentação e não substituem o fluxo consolidado acima.</p>{evidence_cards or '<p>Nenhuma evidência visual foi identificada.</p>'}</section></main></body></html>'''
+    guide_panel = (
+        '<section class="panel request-guide"><h2>Guia recebido para esta análise</h2>'
+        f'<p>{safe(job.get("process_context") or "Não informado.")}</p>'
+        '<small>Orientação da equipe para documentação e cortes; não equivale a um objetivo de negócio confirmado.</small></section>'
+    )
+    html = f'''<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>{safe(job['title'])}</title><style>{report_styles()}</style></head><body><header><small>DOCUMENTAÇÃO ESTRUTURADA PÓS-DISCOVERY DE RPA</small><h1>{safe(job['title'])}</h1><p>Público: {safe(job.get('audience'))} · Nível: {safe(job.get('detail_level'))}</p><nav class="deliverables"><a href="documentacao-processo.docx" download>Documento Word editável</a><a href="documentacao-processo.pdf" download>Documento PDF</a><a href="procedimento-operacional.md" download>Procedimento operacional</a><a href="requisitos-rpa.md" download>Requisitos para RPA</a><a href="matriz-evidencias.csv" download>Matriz de evidências</a><a href="documentacao-processo.json" download>Dados estruturados</a></nav></header><main>{guide_panel}<section class="panel"><small>VISÃO GERAL</small><h2>Resumo executivo</h2><p class="summary">{safe(document.get('executive_summary'))}</p><h3>Objetivo</h3><p>{safe(document.get('objective'))}</p></section><section class="columns"><div class="panel"><h2>Escopo incluído</h2>{list_html(document.get('scope', {}).get('in_scope', []))}</div><div class="panel"><h2>Fora do escopo</h2>{list_html(document.get('scope', {}).get('out_of_scope', []))}</div></section><section class="columns"><div class="panel"><h2>Atores e responsabilidades</h2><ul class="entity-list">{actors}</ul></div><div class="panel"><h2>Sistemas envolvidos</h2><ul class="entity-list">{systems}</ul></div></section><section class="panel"><h2>Pré-requisitos</h2>{list_html(document.get('prerequisites', []))}</section><section class="columns"><div class="panel"><h2>Entradas</h2><table><thead><tr><th>Entrada</th><th>Origem</th><th>Obrigatoriedade</th></tr></thead><tbody>{input_rows}</tbody></table></div><div class="panel"><h2>Saídas</h2><table><thead><tr><th>Saída</th><th>Destino</th></tr></thead><tbody>{output_rows}</tbody></table></div></section><section><small>PROCESSO ATUAL</small><h2>Fluxo operacional consolidado</h2>{flow_cards or '<p class="empty">Nenhuma etapa foi identificada.</p>'}</section><section class="panel"><h2>Regras de negócio</h2><ol class="rules">{rules}</ol></section><section class="panel"><h2>Exceções e tratamentos</h2><table><thead><tr><th>Cenário</th><th>Tratamento</th><th>Status</th></tr></thead><tbody>{exceptions}</tbody></table></section><section class="panel"><h2>Riscos e controles</h2><table><thead><tr><th>Risco</th><th>Impacto</th><th>Controle</th></tr></thead><tbody>{risks}</tbody></table></section><section><h2>Oportunidades de automação</h2><div class="opportunities">{opportunities}</div></section><section class="columns"><div class="panel"><h2>Pontos a validar</h2>{list_html(document.get('open_questions', []), 'Nenhum ponto adicional registrado.')}</div><div class="panel"><h2>Limitações desta análise</h2>{list_html(document.get('limitations', []))}</div></section>{preview}<section><small>ANEXO DE COMPROVAÇÃO</small><h2>Matriz visual e falas relacionadas</h2><p>Cada evidência abre o corte em que o assunto é falado, começando pouco antes do print e seguindo até o fim do trecho. As evidências sustentam a documentação e não substituem o fluxo consolidado acima.</p>{evidence_cards or '<p>Nenhuma evidência visual foi identificada.</p>'}</section></main></body></html>'''
     (workspace / "relatorio.html").write_text(html, encoding="utf-8")
 
 
@@ -1192,9 +1370,15 @@ def process(job: dict, workspace: Path, progress):
     (workspace / "analise-visual.json").write_text(json.dumps(steps, ensure_ascii=False, indent=2), encoding="utf-8")
     progress(72, "Estruturando o processo, regras e requisitos de RPA")
     documentation = synthesize_documentation(job, steps, transcript, workspace)
+    if not transcript:
+        documentation["limitations"].append("Não foi possível obter falas da gravação; a análise contextual por áudio precisa ser validada antes do uso operacional.")
+        documentation["preview_moments"] = []
     progress(80, "Montando previews separados com os trechos relevantes" if len(source_videos) > 1 else "Montando o preview com os trechos relevantes")
     preview, source_previews = create_job_previews(video, source_videos, steps, workspace, documentation.get("preview_moments", []))
     progress(92, "Montando a documentação e o pacote completo")
     write_report(job, steps, workspace, video, documentation, source_previews)
     create_package(workspace)
-    return {"video": str(video), "source_files": [str(item) for item in source_videos], "source_count": len(source_videos), "evidence_count": len(evidence), "transcript_segments": len(transcript), "step_count": len(steps), "process_step_count": len(documentation.get("process_flow", [])), "deliverables": ["relatorio.html", "documentacao-processo.docx", "documentacao-processo.pdf", "procedimento-operacional.md", "requisitos-rpa.md", "matriz-evidencias.csv", "documentacao-processo.json", "previews separados", "roteiro-cortes.json"], "preview": preview, "previews": source_previews}
+    warnings = [path.read_text(encoding="utf-8") for path in (workspace / "transcricao-aviso.txt", workspace / "documentacao-aviso.txt", workspace / "documentacao-pdf-aviso.txt") if path.is_file()]
+    if not preview.get("created"):
+        warnings.append("Nenhum preview contextual foi gerado. Consulte as limitações da documentação e revise o contexto ou a transcrição.")
+    return {"video": str(video), "source_files": [str(item) for item in source_videos], "source_count": len(source_videos), "evidence_count": len(evidence), "transcript_segments": len(transcript), "step_count": len(steps), "process_step_count": len(documentation.get("process_flow", [])), "deliverables": ["relatorio.html", "documentacao-processo.docx", "documentacao-processo.pdf", "procedimento-operacional.md", "requisitos-rpa.md", "matriz-evidencias.csv", "documentacao-processo.json", "previews separados", "roteiro-cortes.json"], "preview": preview, "previews": source_previews, "warnings": warnings}
