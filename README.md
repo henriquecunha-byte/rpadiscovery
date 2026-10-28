@@ -1,6 +1,6 @@
-# Btime RPA Docs
+# Btime Discovery
 
-Aplicativo local para transformar gravações de discovery em documentação operacional de RPA, cruzando transcrição, prints e análise visual.
+Aplicativo local para transformar gravações em documentos para diferentes áreas, cruzando transcrição, evidências visuais e o contexto de cada pedido. O pacote Python e os caminhos históricos mantêm o nome `rpa_docs` por compatibilidade.
 
 ## Funcionalidades
 
@@ -19,13 +19,15 @@ Aplicativo local para transformar gravações de discovery em documentação ope
 - tratamento de participantes por papel operacional, sem atribuir nomes quando o áudio não possui identificação confiável de locutor;
 - relatório HTML navegável e JSON estruturado por trabalho;
 - matriz de evidências que reproduz o corte em que o assunto é falado, a partir do print e sem sair do relatório;
-- documentação orientada ao processo, com objetivo, escopo, atores, sistemas, pré-requisitos, entradas, saídas, regras, exceções, riscos e oportunidades de automação;
-- documento Word editável, documento PDF, procedimento operacional, requisitos para RPA e matriz de evidências separados da transcrição bruta;
-- download da gravação analisada e exportação da documentação em PDF direto do painel de acompanhamento;
+- seis perfis de documentação: Personalizado, Reunião, Treinamento, Entrevista, Pesquisa e Processo / RPA;
+- documentos gerais com temas, decisões, próximos passos, aprendizados, perguntas/respostas, achados ou recomendações, conforme o perfil e os entregáveis escolhidos;
+- documentação de Processo / RPA com fluxo, atores, sistemas, regras, exceções e requisitos de automação, sem impor essas seções aos demais perfis;
+- Word editável, PDF, HTML, Markdown, JSON e matriz de evidências separados da transcrição bruta;
+- documentação completa com prints legível dentro do app, com índice de seções, PDF sob demanda e ZIP complementar;
 - pacote ZIP com relatório, preview, prints, transcrição, PDF e dados estruturados;
 - conexão opcional com Google Drive por OAuth e envio do pacote para uma pasta compartilhada;
 - orçamento de referência (não é um teto automático de cobrança) e autorização explícita por execução;
-- diretório separado para cada análise em `jobs/<id>`; o ambiente local ainda não possui autenticação e isolamento por integrante da equipe;
+- diretório separado para cada análise em `jobs/<id>` e autorização por proprietário preparada; o modo local não autentica integrantes da equipe;
 - cancelamento de trabalhos na fila ou em processamento, preservando os arquivos já recebidos;
 - retomada de trabalhos com falha ou cancelados sem repetir o upload;
 - acompanhamento com tempo decorrido, etapa, posição na fila e previsão restante baseada no ritmo atual e no histórico;
@@ -49,22 +51,40 @@ Aplicativo local para transformar gravações de discovery em documentação ope
 
 O painel abre em `http://127.0.0.1:8770`.
 
-## Prompt automático do discovery
+## Login e acesso da equipe
 
-O botão **Ajudar a escrever**, na etapa Contexto, sugere o texto que orienta a análise: ele parte do nome do processo, do público, do nível de detalhe, do rascunho já digitado e dos arquivos na pilha. O guia declara o assunto do discovery e orienta quais blocos falados permanecem no preview. Revise a sugestão antes de autorizar a execução.
+A base de login e recuperação está criada, mas permanece **inativa até a integração real com o Supabase**. A entrada inicial oferece **Continuar no ambiente local**, explicitamente sem autenticação. O botão **Sair do modo local** limpa a interface e os rascunhos deste app no navegador, sem cancelar análises no servidor.
+
+`AUTH_MODE=local` preserva os testes atuais. `AUTH_MODE=required` bloqueia a API enquanto o provedor não estiver implementado. Preencher as variáveis do Supabase não ativa o login sozinho. Consulte o contrato, limitações e próximos passos em [docs/AUTH-FOUNDATION.md](docs/AUTH-FOUNDATION.md).
+
+O isolamento por proprietário já está implementado no SQLite e nas rotas: uma conta só poderá acessar suas análises, vídeos, cortes e documentos, inclusive por links diretos. O modo local só vê trabalhos legados/locais sem proprietário; não há associação automática ao primeiro login. A autenticação real continua pendente. [Privacidade por conta e integração futura](docs/USER-PRIVACY.md).
+
+## Contexto personalizado por pedido
+
+Na etapa **Contexto**, escolha o tipo de documentação. Novos pedidos começam em **Personalizado**; **Área ou projeto** é opcional nos perfis gerais. Cliente, solução e etapa técnica aparecem no perfil **Processo / RPA**. O público, o objetivo, os entregáveis e o guia continuam personalizados por pedido.
+
+O botão **Melhorar com IA** usa o contexto e o guia atual. O pedido orienta a organização do conteúdo e os trechos que ficam nos previews: ideias completas e falas relevantes são preservadas, sem meta artificial de duração. Trocar de perfil preserva o guia editado manualmente e sinaliza que ele deve ser revisado. Rascunhos e análises antigos sem perfil permanecem em Processo / RPA.
+
+Os perfis gerais exportam `documentacao.docx`, `documentacao.pdf` e `documentacao.json`, além do Markdown correspondente ao perfil. Não geram requisitos de RPA. Trabalhos antigos mantêm os arquivos e links anteriores. Consulte o [plano, contratos e QA multiarea](docs/MULTI-AREA-PLAN.md).
 
 Sem `OPENAI_API_KEY` configurada, o botão devolve um prompt base montado localmente com as mesmas regras e avisa que a API não respondeu. O texto sempre pode ser editado antes de criar a documentação.
 
+Falhas da IA aparecem como avisos legíveis, sem incluir a chave nem a resposta técnica bruta do provedor. Após alterar o `.env`, reinicie o servidor para carregar a nova configuração.
+
 ## Downloads da entrega
 
-Com o trabalho concluído, **Vídeos e cortes** oferece um player e um download por gravação, com o roteiro dos trechos mantidos. A aba **Documentação** reúne relatório navegável, Word, PDF, procedimento, requisitos, matriz de evidências e dados estruturados. **Baixar pacote completo** reúne os materiais no ZIP. O PDF acompanha as mesmas seções do Word e é gerado sob demanda para trabalhos antigos.
+Com o trabalho concluído, **Vídeos e cortes** oferece um player e um download por gravação, com o roteiro dos trechos mantidos. A aba **Documentação** mostra o documento completo diretamente no app: texto, etapas e prints, com um índice de seções. Não é necessário abrir um PDF ou baixar arquivos para ler.
+
+**Exportar PDF** gera uma cópia do documento aberto, com as mesmas evidências. **Baixar ZIP** reúne os formatos disponíveis da análise: Word editável, PDF, HTML, Markdown, JSON, matriz de evidências, prints e vídeos quando solicitados. A lista de formatos fica recolhida, sem substituir a leitura por cartões de download.
+
+Leitura e exportação não chamam IA nem reprocessam as gravações. As rotas verificam o proprietário e a versão salva; se o documento ou uma imagem mudar, a exportação antiga pede uma atualização da leitura. Um pacote incompatível é recusado e deve ser revisado pela ação própria da análise. Consulte [QA do leitor integrado](docs/QA-INLINE-DOCUMENTATION-2026-10-19.md).
 
 Quando a transcrição ou a síntese estiver indisponível, a entrega declara a limitação. Não são criados cortes supostamente contextuais apenas a partir de prints. Documentos e inferências precisam da revisão de quem conhece o processo.
 
 ## Uso do painel
 
 1. Em **Nova análise**, adicione as fontes; a pilha é incremental. Para alternar entre computador e Drive, confirme a troca da seleção.
-2. Informe o processo e o guia de análise e cortes. O rascunho textual fica neste navegador; arquivos e autorização não são restaurados após fechar a página.
+2. Preencha cliente, processo, soluções, etapa, público e entregáveis. O guia de análise e cortes é gerado pelos campos; você pode acrescentar instruções, editar manualmente ou melhorar com IA. No modo local, o rascunho textual fica neste navegador; arquivos e autorização não são restaurados após fechar a página. Nas sessões autenticadas, o rascunho permanece apenas na sessão.
 3. Revise e autorize o uso da API. Aguarde o upload terminar antes de fechar a página.
 4. Em **Minhas análises**, busque e filtre os pedidos. Cancelar preserva as fontes; retomar reaproveita os arquivos recebidos. O cancelamento de uma etapa longa aguarda um ponto seguro.
 5. A limpeza pede confirmação e remove somente trabalhos com falha ou cancelados e seus arquivos locais. Não é uma ação reversível pelo aplicativo.
@@ -73,7 +93,10 @@ Quando a transcrição ou a síntese estiver indisponível, a entrega declara a 
 
 O plano está em [docs/QA-IMPROVE-PLAN.md](docs/QA-IMPROVE-PLAN.md) e o aceite em [docs/QA-REPORT.md](docs/QA-REPORT.md). As verificações de backend e entregáveis têm relatórios próprios em `docs/`.
 
+A nova etapa estruturada, a migração dos rascunhos e os limites de dados sensíveis estão documentados em [docs/CONTEXT-STEP.md](docs/CONTEXT-STEP.md).
+
 ```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 .\.venv\Scripts\python.exe scripts\qa_server.py
 ```
@@ -102,3 +125,26 @@ GOOGLE_DRIVE_FOLDER_ID=
 ```
 
 Para importar fontes diretamente, o aplicativo solicita leitura do Drive; para publicar entregas, solicita gravação dos arquivos que ele cria. Ele nunca altera ou exclui as fontes. No protótipo local, a conexão representa um usuário. Quando a ferramenta ganhar autenticação de equipe, os tokens devem ser vinculados e criptografados por usuário no backend corporativo.
+
+### Documentação estática com prints — 19/10/2026
+
+PDF, Word e relatório HTML incorporam as evidências junto das etapas/itens, com legenda, arquivo de origem e horário. O HTML usa imagens incorporadas, sem depender de rede para mostrar os prints. Uma referência ausente ou imagem corrompida gera um aviso explícito, não uma imagem substituta. Evidências repetidas são referenciadas no PDF/Word sem duplicar a mesma figura.
+
+Na etapa Contexto, **Formato de entrega** permite escolher:
+
+- **Documentação com prints**: padrão dos novos pedidos; não renderiza previews. O resultado abre na aba Documentação. A revisão reaproveita transcrição e prints mesmo se o vídeo original não estiver disponível.
+- **Documentação e vídeos com cortes**: mantém os previews individuais por gravação. Pedidos e rascunhos antigos sem essa escolha preservam este comportamento.
+
+A API persiste essa escolha em `contexto.modoEntrega`: `documentacao` ou `documentacao_previews`. Abrir um trabalho antigo não o reprocessa automaticamente. Para atualizar sua documentação, solicite uma revisão; ela reutiliza a transcrição, pode consumir IA e permite cancelamento.
+
+O arquivo **Dados e prints para integração** (`intercambio-documentacao.zip`) reúne `manifesto-documentacao.json` e apenas as imagens referenciadas, com identificadores, origem, horário, dimensões e SHA-256. É um contrato de intercâmbio versionado, ainda **não uma conexão com o motor As Is**. Template e API da ferramenta interna precisam de alinhamento.
+
+### Arquivamento e recuperação no Drive
+
+Além de **Enviar pacote ao Drive**, a aba Documentação oferece **Arquivar análise no Drive** quando há uma conta local conectada. Exige uma pasta de projeto configurada em Integrações. Envia fontes disponíveis, prints e entregas em uma estrutura por análise e revisão, com índice dos IDs remotos e hashes. Reenvios da mesma revisão reutilizam os arquivos; uma entrega alterada gera outra revisão. O índice só é confirmado no banco após o envio completo, e fontes ausentes são sinalizadas. Não altera permissões nem remove versões remotas.
+
+**Recuperar arquivos do Drive** busca os arquivos da última revisão arquivada, inclusive em uma pasta local vazia. Confere metadados, tamanho e SHA-256 antes de publicar os arquivos recuperados. Não sobrescreve arquivos locais diferentes; uma revisão arquivada pode ser anterior à entrega atual. Não é um mecanismo de restauração do banco: o índice remoto fica associado ao trabalho no SQLite, cujo backup continua necessário.
+
+Os endpoints são `POST /api/jobs/{id}/drive` com `include_assets: true` e `POST /api/jobs/{id}/drive/restore`. As ações exigem propriedade do trabalho e preservam o bloqueio do Drive por usuário autenticado enquanto os tokens corporativos individuais não forem implementados. Nada é enviado automaticamente. A integração foi testada com serviço simulado; OAuth, pasta e permissões corporativas ainda exigem aceite real.
+
+O relatório da rodada, evidências, limitações e **Product QA Guardrails** estão em [docs/QA-STATIC-EVIDENCE-2026-10-19.md](docs/QA-STATIC-EVIDENCE-2026-10-19.md). Não há garantia de capturar cada mudança rápida de tela: a seleção visual ainda usa amostragem periódica e precisa de revisão humana.

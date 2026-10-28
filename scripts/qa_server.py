@@ -10,6 +10,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import shutil
 from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -25,6 +26,8 @@ os.environ["GOOGLE_CLIENT_SECRET"] = ""
 from rpa_docs.api import app, db, worker
 from rpa_docs.config import FFMPEG, JOBS_DIR
 from rpa_docs.pipeline import prepare_source, extract_evidence, create_job_previews, create_package, write_report, fallback_documentation
+from rpa_docs.documentation_profiles import PROFILES, item_count
+from rpa_docs.schemas import JobCreate
 
 
 def job_payload(title, source, context="Documentar a gestão de pedidos da Trevo. Manter regras e exceções discutidas; remover conversas sem relação com o processo."):
@@ -65,10 +68,45 @@ for job_id, title, status, progress, stage in [
     db.update(job_id, status=status, progress=progress, stage=stage, error="Arquivo indisponível durante a leitura." if status == "FAILED" else None)
     db.event(job_id, "error" if status=="FAILED" else "info", stage)
 
+# General-profile fixtures reuse only synthetic media and predefined content.
+for profile_id, profile in PROFILES.items():
+    if profile_id == "processo":
+        continue
+    general_workspace = JOBS_DIR / ("qa-" + profile_id)
+    general_workspace.mkdir()
+    for folder in ("input", "evidence", "previews", "roteiros"):
+        shutil.copytree(workspace / folder, general_workspace / folder)
+    for name in ("transcricao.json", "roteiro-cortes.json"):
+        shutil.copy2(workspace / name, general_workspace / name)
+    context = {"perfil": profile_id, "processo": "[QA sintético] Comunicação — " + profile["label"],
+               "publico": ["equipe"], "entregaveis": profile["suggestions"]}
+    general_payload = JobCreate(contexto=context, source_path=str(general_workspace / "input"), api_approved=True).model_dump()
+    general_job = db.create_job("qa-" + profile_id, general_payload)
+    general_document = fallback_documentation(general_job, [])
+    general_document.update(executive_summary="Conteúdo sintético para validar documentos e navegação.", objective="Verificar o perfil " + profile["label"], limitations=["Dados sintéticos; nenhuma inferência real de IA foi executada."])
+    for section in general_document["sections"]:
+        section["items"] = [{"title": "Planejamento de comunicação", "text": "A equipe alinhou a campanha. A data de lançamento ficou pendente de validação.", "evidence_refs": [1], "timecode": "00:00:06"}]
+    general_document["preview_moments"] = moments
+    general_steps = [{**steps[0], "frame_index": 1}]
+    write_report(general_job, general_steps, general_workspace, video, general_document, previews)
+    create_package(general_workspace)
+    db.update(general_job["id"], status="COMPLETED", progress=100, stage="Documentação pronta", result_json={"source_count": 2, "evidence_count": 1, "process_step_count": item_count(general_document), "previews": previews, "preview": preview})
+
+# Dedicated static delivery: new mode, two real synthetic prints, no video.
+from tests.test_static_evidence import fixture
+static_workspace = JOBS_DIR / "qa-documents"
+static_workspace.mkdir(exist_ok=True)
+static_payload, static_document, static_steps = fixture(static_workspace, "reuniao")
+static_job = db.create_job("qa-documents", static_payload)
+write_report(static_job, static_steps, static_workspace, Path("missing-synthetic.mp4"), static_document, [])
+create_package(static_workspace)
+db.update("qa-documents", status="COMPLETED", progress=100, stage="Documentação pronta",
+          result_json={"evidence_count": 2, "process_step_count": item_count(static_document), "previews": [], "warnings": []})
+
 # Explicitly no worker processing or cloud calls. Health models an available
 # worker for UI scenarios; all job transitions are exercised by API tests.
 worker.thread = SimpleNamespace(is_alive=lambda: True)
 print(f"QA_FIXTURES={qa_root}", flush=True)
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="127.0.0.1", port=8772, lifespan="off")
+    uvicorn.run(app, host="127.0.0.1", port=int(os.getenv("QA_PORT", "8772")), lifespan="off")

@@ -188,6 +188,7 @@ class PipelineQATests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             document = {"limitations": [], "preview_moments": [{"start": 1, "end": 10}], "process_flow": []}
+            self.enterContext(patch("rpa_docs.pipeline.probe_duration", return_value=30))
             with patch("rpa_docs.pipeline.prepare_source", return_value=(Path("video.mp4"), [Path("video.mp4")])), patch("rpa_docs.pipeline.extract_evidence", return_value=[]), patch("rpa_docs.pipeline.transcribe", return_value=[]), patch("rpa_docs.pipeline.analyze", return_value=[]), patch("rpa_docs.pipeline.synthesize_documentation", return_value=document), patch("rpa_docs.pipeline.create_job_previews", return_value=({"created": False}, [])) as previews, patch("rpa_docs.pipeline.write_report"), patch("rpa_docs.pipeline.create_package"):
                 result = process({"source_path": "video.mp4", "process_context": "Cadastro", "detail_level": "operacional"}, root, lambda *args: None)
             self.assertEqual(previews.call_args.args[-1], [])

@@ -63,6 +63,70 @@ class ApiTests(unittest.TestCase):
                 self.assertEqual(list(self.jobs_root.iterdir()), [])
                 self.assertEqual(self.database.list_jobs(), [])
 
+    def test_document_only_revision_can_reuse_evidence_without_originals(self):
+        context = {"perfil": "reuniao", "modoEntrega": "documentacao", "processo": "Planejamento", "publico": ["equipe"], "entregaveis": ["topicos"]}
+        job = self.upload(contexto=json.dumps(context)).json()
+        workspace = self.jobs_root / job["id"]
+        from rpa_docs.pipeline import write_report, fallback_documentation
+        write_report(job, [], workspace, Path("missing.mp4"), fallback_documentation(job, []), [])
+        (workspace / "transcricao.json").write_text("[]", encoding="utf-8")
+        for path in (workspace / "input").glob("*.mp4"):
+            path.unlink()
+        self.database.update(job["id"], status="COMPLETED", result_json={"evidence_count": 0, "video": "missing.mp4"})
+        detail = self.client.get(f'/api/jobs/{job["id"]}').json()
+        self.assertTrue(detail["can_rebuild"])
+        self.assertEqual(detail["delivery_mode"], "documentacao")
+        self.assertEqual(self.client.get(f'/api/jobs/{job["id"]}/intercambio-documentacao.zip').status_code, 200)
+        self.assertEqual(self.client.post(f'/api/jobs/{job["id"]}/rebuild-documents').status_code, 202)
+
+    def test_drive_asset_publish_and_restore_are_explicit_and_reject_busy_jobs(self):
+        job = self.create()
+        workspace = self.jobs_root / job["id"]
+        (workspace / "entrega-completa.zip").write_bytes(b"package")
+        with patch.object(self.api, "local_store") as store:
+            response = self.client.post(f'/api/jobs/{job["id"]}/drive', json={"folder": "project", "include_assets": True})
+            self.assertEqual(response.status_code, 409)
+            store.assert_not_called()
+            self.database.update(job["id"], status="COMPLETED")
+            store.return_value.publish.return_value = {"schema_version": 1, "job_id": job["id"], "webViewLink": "https://drive.google.com/drive/folders/synthetic", "sources_complete": True, "assets": [{"path": "documentacao-processo.pdf"}]}
+            response = self.client.post(f'/api/jobs/{job["id"]}/drive', json={"folder": "project", "include_assets": True})
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(response.json()["asset_count"], 1)
+            store.return_value.restore.return_value = {"restored": 1, "sources": []}
+            response = self.client.post(f'/api/jobs/{job["id"]}/drive/restore')
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(response.json()["restored"], 1)
+
+    def test_general_profile_upload_downloads_and_retry_keep_profile(self):
+        context = {"perfil": "reuniao", "processo": "Planejamento de comunicação", "publico": ["equipe"], "entregaveis": ["topicos", "decisoes"]}
+        response = self.upload(contexto=json.dumps(context))
+        self.assertEqual(response.status_code, 201, response.text)
+        job = response.json()
+        self.assertEqual(job["contexto"]["perfil"], "reuniao")
+        self.assertEqual(job["contexto"]["cliente"], "")
+        from rpa_docs.pipeline import write_report, fallback_documentation
+        workspace = self.jobs_root / job["id"]
+        write_report(job, [], workspace, Path("synthetic.mp4"), fallback_documentation(job, []), [])
+        self.database.update(job["id"], status="COMPLETED", result_json={})
+        detail = self.client.get(f'/api/jobs/{job["id"]}').json()
+        filenames = [item["filename"] for item in detail["documents"]]
+        self.assertIn("registro-reuniao.md", filenames)
+        self.assertNotIn("requisitos-rpa.md", filenames)
+        for name in ("registro-reuniao.md", "documentacao.docx", "documentacao.pdf", "documentacao.json"):
+            download = self.client.get(f'/api/jobs/{job["id"]}/{name}')
+            self.assertEqual(download.status_code, 200, name)
+        (workspace / "documentacao.pdf").unlink()
+        self.assertEqual(self.client.get(f'/api/jobs/{job["id"]}/documentacao.pdf').status_code, 200)
+        self.database.update(job["id"], status="FAILED")
+        retried = self.client.post(f'/api/jobs/{job["id"]}/retry').json()
+        self.assertEqual(retried["contexto"]["perfil"], "reuniao")
+
+    def test_invalid_profile_does_not_store_files(self):
+        context = {"perfil": "reuniao", "processo": "Reunião", "publico": ["equipe"], "entregaveis": ["campos_io"]}
+        response = self.upload(contexto=json.dumps(context))
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(list(self.jobs_root.iterdir()), [])
+
     def test_approval_required_and_empty_file_rejected(self):
         self.assertEqual(self.upload(api_approved="false").status_code, 400)
         self.assertEqual(self.upload(files=[("files", ("empty.mp4", b"", "video/mp4"))]).status_code, 400)
@@ -224,6 +288,90 @@ class ApiTests(unittest.TestCase):
         for key in ("worker", "ffmpeg", "ffprobe", "api_configured"):
             self.assertIsInstance(response.json()[key], bool)
         self.assertIn("no-store", self.client.get("/").headers["cache-control"])
+
+    @staticmethod
+    def structured_context(**changes):
+        return {"cliente": "Cliente de QA", "processo": "Conciliação", "solucoes": ["integracao"],
+                "etapaDestino": "doc_tecnica", "publico": ["squad_ia", "cliente"],
+                "entregaveis": ["fluxo_atual", "campos_io"], "entregaveisTocado": True,
+                "sistemas": ["Excel", "ERP"], "dadosSensiveis": True,
+                "guia": "Texto desatualizado que não deve prevalecer", "guiaEditado": False, **changes}
+
+    def test_structured_upload_stores_context_and_authoritative_guide_for_two_sources(self):
+        from rpa_docs.context_model import compile_guide
+        context = self.structured_context()
+        response = self.upload(contexto=json.dumps(context), process_context="Guia adulterado", files=[
+            ("files", ("a.mp4", b"synthetic-a", "video/mp4")),
+            ("files", ("b.mp4", b"synthetic-b", "video/mp4")),
+        ])
+        self.assertEqual(response.status_code, 201, response.text)
+        job = response.json()
+        self.assertEqual(job["title"], context["processo"])
+        self.assertEqual(job["process_context"], compile_guide(context))
+        self.assertEqual(job["contexto"]["guia"], job["process_context"])
+        self.assertEqual(job["contexto"]["sistemas"], ["Excel", "ERP"])
+        self.assertTrue(job["contexto"]["dadosSensiveis"])
+        self.assertNotIn("contexto_json", job)
+        self.assertEqual(len(list(Path(job["source_path"]).glob("*.mp4"))), 2)
+        for endpoint in ("/api/jobs", "/api/jobs/" + job["id"]):
+            value = self.client.get(endpoint).json()
+            self.assertEqual((value[0] if isinstance(value, list) else value)["contexto"], job["contexto"])
+
+    def test_structured_manual_guide_is_preserved_and_empty_manual_is_rejected(self):
+        manual = "Manter a explicação completa do cliente e as perguntas de validação."
+        response = self.upload(contexto=json.dumps(self.structured_context(guia=manual, guiaEditado=True)))
+        self.assertEqual(response.status_code, 201, response.text)
+        self.assertEqual(response.json()["process_context"], manual)
+        self.assertTrue(response.json()["contexto"]["guiaEditado"])
+        response = self.upload(contexto=json.dumps(self.structured_context(guia="  ", guiaEditado=True)))
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(len(self.database.list_jobs()), 1)
+
+    def test_invalid_structured_upload_writes_nothing_and_does_not_echo_input(self):
+        for context in ("bad-json", "null", "[]", json.dumps(self.structured_context(cliente="")),
+                        json.dumps(self.structured_context(publico=["outro"], publicoOutro="")),
+                        json.dumps(self.structured_context(etapaDestino="invalid")),
+                        json.dumps(self.structured_context(entregaveis=[]))):
+            with self.subTest(context=context[:25]):
+                response = self.upload(contexto=context)
+                self.assertEqual(response.status_code, 422, response.text)
+                self.assertEqual(list(self.jobs_root.iterdir()), [])
+                self.assertEqual(self.database.list_jobs(), [])
+                self.assertNotIn('"input":', response.text)
+                self.assertNotIn('"ctx":', response.text)
+
+    def test_structured_drive_import_preserves_context_without_cloud_calls(self):
+        def download(file_ids, destination):
+            destination.mkdir(parents=True)
+            path = destination / "recording.mp4"
+            path.write_bytes(b"synthetic")
+            return [path]
+        with patch.object(self.api, "download_files", side_effect=download):
+            response = self.client.post("/api/jobs/drive-import", json={
+                "contexto": self.structured_context(), "file_ids": ["synthetic-id"], "api_approved": True,
+            })
+        self.assertEqual(response.status_code, 201, response.text)
+        self.assertEqual(response.json()["contexto"]["cliente"], "Cliente de QA")
+        self.assertEqual(response.json()["contexto"]["guia"], response.json()["process_context"])
+
+    def test_ai_failure_contract_and_drive_errors_never_echo_provider_details(self):
+        secret = "SYNTHETIC_SECRET_NOT_A_REAL_KEY"
+        with patch.object(self.api, "suggest_process_prompt", side_effect=RuntimeError(secret)):
+            response = self.client.post("/api/prompt/suggest", json={"contexto": {"cliente": "QA", "processo": "QA"}})
+        self.assertEqual(response.json(), {"ok": False, "code": "ai_unavailable"})
+        for function, endpoint in (("drive_status", "/api/drive/status"), ("authorization_url", "/api/drive/connect"),
+                                   ("list_files", "/api/drive/files")):
+            with patch.object(self.api, function, side_effect=RuntimeError(secret)):
+                response = self.client.get(endpoint)
+                self.assertNotIn(secret, response.text)
+                self.assertNotIn("RuntimeError", response.text)
+
+    def test_context_schema_errors_have_no_raw_input_or_exception_context(self):
+        response = self.client.post("/api/prompt/suggest", json={"contexto": {"cliente": ["arbitrary-input"], "processo": "QA"}})
+        self.assertEqual(response.status_code, 422)
+        self.assertNotIn("arbitrary-input", response.text)
+        self.assertNotIn('"input":', response.text)
+        self.assertNotIn('"ctx":', response.text)
 
 
 if __name__ == "__main__":

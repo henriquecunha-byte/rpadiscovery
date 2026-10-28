@@ -102,7 +102,7 @@ def upload_package(package: Path, job_title: str, folder: str = "") -> dict:
         metadata["parents"] = [folder_id]
     media = MediaFileUpload(str(package), mimetype="application/zip", resumable=True)
     service = build("drive", "v3", credentials=creds, cache_discovery=False)
-    result = service.files().create(body=metadata, media_body=media, fields="id,name,webViewLink,parents").execute()
+    result = service.files().create(body=metadata, media_body=media, fields="id,name,webViewLink,parents", supportsAllDrives=True).execute()
     return result
 
 

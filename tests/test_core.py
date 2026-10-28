@@ -95,7 +95,7 @@ class CoreTests(unittest.TestCase):
             "sources": ["reuniao-1.mp4", "reuniao-2.mp4"],
         })
         first_line = prompt.splitlines()[0]
-        self.assertTrue(first_line.startswith("Assunto do discovery:"))
+        self.assertTrue(first_line.startswith("Objetivo e contexto deste pedido:"))
         self.assertIn("Faturamento de contratos", first_line)
         self.assertIn("reuniao-2.mp4", prompt)
         self.assertIn("Equipe fiscal", prompt)

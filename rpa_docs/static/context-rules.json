@@ -1,0 +1,42 @@
+{
+  "version": 3,
+  "profiles": {
+    "personalizado": {"label":"Personalizado","description":"Organize qualquer assunto conforme o seu objetivo.","document":"Documentação personalizada","filename":"documentacao.md","focus":"Organize o conteúdo por temas conforme o objetivo e as instruções adicionais. Não imponha um domínio ou um formato operacional.","suggestions":["topicos","decisoes","proximos_passos"],"available":["topicos","decisoes","proximos_passos","aprendizados","perguntas_respostas","achados","recomendacoes"]},
+    "reuniao": {"label":"Reunião","description":"Pauta, decisões e encaminhamentos para a equipe.","document":"Registro de reunião","filename":"registro-reuniao.md","focus":"Registre assuntos discutidos, decisões e encaminhamentos. Diferencie proposta de decisão aprovada. Inclua responsáveis e prazos somente quando explícitos; não atribua falas sem identificação confiável.","suggestions":["topicos","decisoes","proximos_passos"],"available":["topicos","decisoes","proximos_passos","perguntas_respostas"]},
+    "treinamento": {"label":"Treinamento","description":"Conceitos, demonstrações e material de consulta.","document":"Guia de treinamento","filename":"guia-treinamento.md","focus":"Organize conceitos, explicações, exemplos e demonstrações em uma sequência didática para o público. Registre exercícios apenas se apresentados; não invente avaliações ou procedimentos.","suggestions":["topicos","aprendizados","perguntas_respostas"],"available":["topicos","aprendizados","perguntas_respostas","proximos_passos"]},
+    "entrevista": {"label":"Entrevista","description":"Perguntas, respostas e temas com contexto preservado.","document":"Registro de entrevista","filename":"registro-entrevista.md","focus":"Organize perguntas e respostas, temas recorrentes e achados sem alterar o sentido das falas. Diferencie relato, opinião e fato verificado. Não identifique entrevistadores ou entrevistados por suposição.","suggestions":["perguntas_respostas","topicos","achados"],"available":["perguntas_respostas","topicos","achados","proximos_passos"]},
+    "pesquisa": {"label":"Pesquisa","description":"Observações, achados e hipóteses a validar.","document":"Relatório de pesquisa","filename":"relatorio-pesquisa.md","focus":"Separe observações, relatos e hipóteses. Relacione achados às evidências e registre limitações. Recomendações precisam de fundamento e devem ser apresentadas como propostas, nunca como fatos comprovados.","suggestions":["topicos","achados","recomendacoes"],"available":["topicos","achados","recomendacoes","perguntas_respostas","proximos_passos"]},
+    "processo": {"label":"Processo / RPA","description":"Fluxos, regras, sistemas e requisitos de automação.","document":"Documentação do processo","filename":"procedimento-operacional.md"}
+  },
+  "generalEvidence": ["- Registre informações, exemplos, decisões e números apenas quando demonstrados ou falados, com o minuto de referência.","- O que estiver implícito vira ponto a validar com a pessoa responsável. Não preencha lacunas com suposições."],
+  "labels": {
+    "solucoes": {"rpa":"RPA","ia":"Automação com IA","integracao":"Integração entre sistemas","flow":"Módulo no btime Flow","indefinido":"Ainda não definido"},
+    "etapas": {"desenho":"Desenho e validação da solução","doc_tecnica":"Documentação técnica","spec_rpa":"Especificação de RPA"},
+    "publico": {"rpa":"Equipe de RPA","squad_ia":"Squad de IA","dev_flow":"Dev btime Flow","cliente":"Cliente (validação)","comercial":"Comercial / pré-venda","outro":"Outro","equipe":"Equipe","gestao":"Liderança","participantes":"Participantes","alunos":"Alunos / pessoas em treinamento"},
+    "entregaveis": {"fluxo_atual":"Fluxo atual, passo a passo","sistemas_telas":"Sistemas e telas usados","campos_io":"Campos, entradas e saídas de dados","regras_excecoes":"Regras de negócio e exceções","volume_tempo":"Volume, frequência e tempo gasto hoje","dores":"Dores nas palavras do cliente","oportunidades":"Pontos com potencial de automação","prints_por_tela":"Print de cada tela com descrição","perguntas_abertas":"Perguntas em aberto para validar com o cliente","topicos":"Temas e pontos principais","decisoes":"Decisões e justificativas","proximos_passos":"Próximos passos e pendências","aprendizados":"Conceitos, exemplos e aprendizados","perguntas_respostas":"Perguntas e respostas","achados":"Achados e evidências","recomendacoes":"Recomendações e hipóteses"}
+  },
+  "suggestions": {
+    "base": {
+      "desenho":["fluxo_atual","sistemas_telas","volume_tempo","dores","oportunidades","perguntas_abertas"],
+      "doc_tecnica":["fluxo_atual","sistemas_telas","campos_io","regras_excecoes","volume_tempo","perguntas_abertas"],
+      "spec_rpa":["fluxo_atual","sistemas_telas","campos_io","regras_excecoes","prints_por_tela","perguntas_abertas"]
+    },
+    "extra": {"rpa":["campos_io","prints_por_tela"],"ia":["regras_excecoes"],"integracao":["campos_io","sistemas_telas"],"flow":["fluxo_atual","regras_excecoes"],"indefinido":["oportunidades"]}
+  },
+  "TOM": {
+    "desenho":"Escreva de forma que o cliente consiga validar: sem jargão técnico, com foco no fluxo, nas dores e nas oportunidades.",
+    "doc_tecnica":"Escreva para a equipe técnica da btime: passo a passo numerado, com regras e exceções explícitas.",
+    "spec_rpa":"Escreva para quem vai construir o robô: tela a tela, com cada campo, ação e validação."
+  },
+  "FOCO": {
+    "rpa":"Para cada passo, registre a tela, o campo, a ação (clique, digitação, cópia, upload ou download), de onde vem o dado, para onde vai e o que acontece em caso de erro. Aponte os passos que dependem de julgamento humano.",
+    "ia":"Aponte as decisões que dependem de ler ou interpretar algo (documentos, mensagens, e-mails) e os critérios que a pessoa usa para decidir.",
+    "integracao":"Registre qual dado sai de qual sistema e entra em qual, o formato e a frequência dessa troca.",
+    "flow":"Registre quem executa cada etapa, as aprovações, os status e os formulários usados. Eles viram telas e fluxos no btime Flow.",
+    "indefinido":"Ao final, liste os trechos com maior potencial de automação e explique por quê."
+  },
+  "REGRA_DADOS_SENSIVEIS":"- As gravações mostram dados pessoais. Na transcrição e na documentação, troque CPF, nomes de pessoas, dados de saúde e valores de clientes por marcadores ([CPF], [NOME], [DADO DE SAÚDE], [VALOR]). Sinalize cada print que mostre esses dados.",
+  "cutKeep":"- Mantenha todo trecho sobre \"{processo}\", da pergunta inicial até o fim da resposta, incluindo contrapontos, exemplos, demonstrações de tela, decisões e próximos passos.",
+  "cutDiscard":"- Descarte apenas trechos de outro assunto, saudação, espera, silêncio, problema técnico sem conteúdo e conversa paralela.",
+  "evidence":["- Registre sistemas, telas, campos, regras, exceções e números apenas quando aparecerem na tela ou forem ditos na gravação, com o minuto de referência.","- O que estiver implícito vira \"ponto a validar com o cliente\". Não preencha lacunas com suposições."]
+}

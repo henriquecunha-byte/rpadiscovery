@@ -21,6 +21,14 @@ async function route(hash) { await page.goto(base+'/#'+hash); await page.waitFor
 async function screenshot(name) { await page.screenshot({path:path.join(output,name+'.png'),fullPage:true}); }
 async function hasNoOverflow() { const metrics=await page.evaluate(()=>({width:innerWidth,scroll:document.documentElement.scrollWidth}));assert.ok(metrics.scroll<=metrics.width+1,JSON.stringify(metrics)); }
 async function confirmAction() { await page.locator('#confirmDialog').waitFor({state:'visible'});await page.locator('#acceptConfirm').click();await page.locator('#confirmDialog').waitFor({state:'hidden'}); }
+async function fillContext(process,guide) {
+ await page.locator('#perfil').selectOption('processo');
+ await page.locator('#cliente').fill('Grupo Trevo');await page.locator('#processo').fill(process);
+ await page.locator('input[name="solucoes"][value="rpa"]').check();await page.locator('input[name="publico"][value="rpa"]').check();
+ if(await page.locator('#toggleGuide').getAttribute('aria-expanded')==='false')await page.locator('#toggleGuide').click();
+ if(await page.locator('#context').getAttribute('readonly')!==null)await page.locator('#editGuide').click();
+ await page.locator('#context').fill(guide);
+}
 (async()=>{
  browser=await chromium.launch({headless:true,channel:'chrome'});
  context=await browser.newContext({viewport:{width:1440,height:1080},reducedMotion:'reduce'});
@@ -42,9 +50,9 @@ async function confirmAction() { await page.locator('#confirmDialog').waitFor({s
   assert.equal(await page.locator('#fileStack .file-stack-item').count(),2);
   await page.locator('#fileStack button').first().click();assert.equal(await page.locator('#fileStack .file-stack-item').count(),1);
  });
- await check('Context required; review remains blocked',async()=>{await page.locator('#nextStep').click();await page.locator('#nextStep').click();assert.equal(await page.locator('#step2').isVisible(),true);assert.ok((await page.locator('#titleError').innerText()).length>0);});
+ await check('General context requires a subject, not a client; review remains blocked',async()=>{await page.locator('#nextStep').click();await page.locator('#nextStep').click();assert.equal(await page.locator('#step2').isVisible(),true);assert.equal(await page.locator('#clienteError').innerText(),'');assert.equal(await page.locator('#processoError').innerText(),'Informe o assunto da análise.');assert.equal(await page.evaluate(()=>document.activeElement.id),'processo');});
  await check('Draft text survives reload but approval and files do not',async()=>{
-  await page.locator('#title').fill('QA — Trevo');await page.locator('#context').fill('Manter todas as falas sobre a Trevo, incluindo regras, exceções e decisões.');await page.reload();await page.waitForFunction(()=>document.querySelector('#title').value==='QA — Trevo');assert.equal(await page.locator('#approved').isChecked(),false);assert.equal(await page.locator('#fileStack .file-stack-item').count(),0);
+  await fillContext('QA — Trevo','Manter todas as falas sobre a Trevo, incluindo regras, exceções e decisões.');await page.reload();await page.waitForFunction(()=>document.querySelector('#processo').value==='QA — Trevo');assert.equal(await page.locator('#cliente').inputValue(),'Grupo Trevo');assert.equal(await page.locator('#context').inputValue(),'Manter todas as falas sobre a Trevo, incluindo regras, exceções e decisões.');assert.equal(await page.locator('input[name="publico"][value="rpa"]').isChecked(),true);assert.equal(await page.locator('#approved').isChecked(),false);assert.equal(await page.locator('#fileStack .file-stack-item').count(),0);
  });
  if(fixtureRoot) await check('Real upload creates one queued job; duplicate click blocked',async()=>{
   await page.locator('#videoInput').setInputFiles(path.join(fixtureRoot,'jobs','qa-completed','input','01-reuniao-sintetica.mp4'));
@@ -55,7 +63,7 @@ async function confirmAction() { await page.locator('#confirmDialog').waitFor({s
   page.off('request',listener);assert.equal(submissions,1);assert.equal(await page.locator('#cancelJob').isVisible(),true);
  });
  await route('history');await page.locator('#jobs .job').first().waitFor();await screenshot('02-history-desktop');
- await check('History searches and filters status',async()=>{await page.locator('#searchJobs').fill('Conciliação');await page.waitForFunction(()=>document.querySelectorAll('#jobs .job').length===1);assert.match(await page.locator('#jobs').innerText(),/Conciliação/);await page.locator('#searchJobs').fill('');await page.locator('#statusFilter').selectOption('COMPLETED');await page.waitForFunction(()=>document.querySelectorAll('#jobs .job').length===1);assert.match(await page.locator('#jobs').innerText(),/Trevo/);await page.locator('#statusFilter').selectOption('all');});
+ await check('History searches and filters status',async()=>{await page.locator('#searchJobs').fill('Conciliação');await page.waitForFunction(()=>document.querySelectorAll('#jobs .job').length===1);assert.match(await page.locator('#jobs').innerText(),/Conciliação/);await page.locator('#searchJobs').fill('');await page.locator('#statusFilter').selectOption('COMPLETED');await page.waitForFunction(()=>document.querySelectorAll('#jobs .job').length===7);assert.match(await page.locator('#jobs').innerText(),/Trevo/);assert.doesNotMatch(await page.locator('#jobs').innerText(),/Falhou|Cancelado|Na fila/);await page.locator('#statusFilter').selectOption('all');});
  await route('job=qa-completed');await page.locator('#previewStack video').first().waitFor();await screenshot('03-previews-desktop');
  await check('Separate real previews load and play',async()=>{
   assert.equal(await page.locator('#previewStack video').count(),2);
@@ -71,8 +79,11 @@ async function confirmAction() { await page.locator('#confirmDialog').waitFor({s
  await check('Preview HTTP Range supports seeking',async()=>{const src=await page.locator('#previewStack video').first().getAttribute('src');const response=await context.request.get(new URL(src,base).href,{headers:{Range:'bytes=0-127'}});assert.equal(response.status(),206);assert.equal((await response.body()).length,128);});
  await check('Tabs support keyboard and documents download',async()=>{
   await page.locator('#tabPreviews').focus();await page.keyboard.press('ArrowRight');await page.locator('#panelDocuments').waitFor({state:'visible'});assert.equal(await page.locator('#tabDocuments').getAttribute('aria-selected'),'true');
-  const links=await page.locator('#documentStack a').evaluateAll(links=>links.map(a=>({url:a.href,label:a.getAttribute('aria-label')})));assert.ok(links.length>=7);
-  for(const link of links){const response=await context.request.get(link.url);assert.equal(response.status(),200,link.label);assert.ok((await response.body()).length>0);}
+  await page.locator('#documentStack .document-content').waitFor();
+  const job=await (await context.request.get(base+'/api/jobs/qa-completed')).json();
+  const links=job.documents.filter(item=>item.available&&item.url);assert.ok(links.length>=5);
+  for(const link of links){const response=await context.request.get(new URL(link.url,base).href);assert.equal(response.status(),200,link.label);assert.ok((await response.body()).length>0);}
+  assert.equal(await page.locator('#exportDocumentPdf').isVisible(),true);
   await screenshot('05-documents-desktop');
  });
  await check('Original context and activity remain readable',async()=>{await page.locator('#tabRequest').click();assert.match(await page.locator('#requestContext').innerText(),/Trevo/);await page.locator('#tabActivity').click();assert.ok(await page.locator('#events li').count()>0);});
@@ -80,7 +91,7 @@ async function confirmAction() { await page.locator('#confirmDialog').waitFor({s
  await check('Cancel queued job and retry using retained inputs',async()=>{await route('job=qa-queued');await page.locator('#cancelJob').waitFor({state:'visible'});await page.locator('#cancelJob').click();await confirmAction();await page.waitForFunction(()=>document.querySelector('#detailBadge')?.textContent==='Cancelado');await page.locator('#retryJob').click();await confirmAction();await page.waitForFunction(()=>document.querySelector('#detailBadge')?.textContent.includes('fila'));});
  await check('Failed job exposes recovery and original error',async()=>{await route('job=qa-failed');await page.locator('#retryJob').waitFor({state:'visible'});assert.match(await page.locator('#detailError').innerText(),/indisponível/);await screenshot('06-failed-desktop');});
  await route('settings');await check('Unconfigured Drive does not offer invalid OAuth action',async()=>{await page.waitForFunction(()=>document.querySelector('#driveBadge')?.textContent==='Configurar');assert.equal(await page.locator('#connectDrive').isVisible(),false);assert.ok((await page.locator('#driveStatus').innerText()).length>0);});await screenshot('07-settings-desktop');
- await check('Reduced motion is honored',async()=>{const result=await page.evaluate(()=>({reduced:matchMedia('(prefers-reduced-motion: reduce)').matches,animation:getComputedStyle(document.querySelector('#viewSettings')).animationName}));assert.equal(result.reduced,true);assert.equal(result.animation,'none');});
+ await check('Reduced motion is honored; skip link appears only on focus',async()=>{const result=await page.evaluate(()=>({reduced:matchMedia('(prefers-reduced-motion: reduce)').matches,animation:getComputedStyle(document.querySelector('#viewSettings')).animationName,skipBottom:document.querySelector('.skip-link').getBoundingClientRect().bottom}));assert.equal(result.reduced,true);assert.equal(result.animation,'none');assert.ok(result.skipBottom<0);await page.locator('.skip-link').focus();assert.ok(await page.locator('.skip-link').evaluate(e=>e.getBoundingClientRect().top>=0));await page.locator('#health').focus();assert.ok(await page.locator('.skip-link').evaluate(e=>e.getBoundingClientRect().bottom<0));});
  for(const width of [375,768,1024,1440]) for(const target of ['history','job=qa-completed','settings']) await check('Responsive '+target+' '+width,async()=>{await page.setViewportSize({width,height:1000});await route(target);if(target.startsWith('job'))await page.locator('#previewStack video').first().waitFor();await hasNoOverflow();if(width===375)await screenshot(target.replace('=','-')+'-mobile');});
  await check('Dynamic names are text, never executable markup',async()=>{
   await page.route('**/api/jobs',route=>route.fulfill({json:[{id:'xss-check',title:'<img src=x onerror="window.__xss=1">',process_context:'safe',status:'FAILED',stage:'<svg onload="window.__xss=2">',created_at:new Date().toISOString(),progress:0}]}));await route('history');await page.waitForFunction(()=>document.querySelector('#jobs')?.textContent.includes('onerror'));assert.equal(await page.evaluate(()=>window.__xss),undefined);assert.equal(await page.locator('#jobs img,#jobs svg[onload]').count(),0);await page.unroute('**/api/jobs');

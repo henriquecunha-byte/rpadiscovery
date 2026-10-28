@@ -7,7 +7,10 @@ import tempfile
 from pathlib import Path
 
 from .config import JOBS_DIR
+from .errors import log_failure, public_failure
 from .pipeline import process, synthesize_documentation, create_job_previews, write_report, create_package
+from .documentation_profiles import GENERAL_EXPORTS, document_catalog, item_count
+from .evidence_documents import INTERCHANGE_FILES, wants_previews
 
 
 class JobCancelled(RuntimeError):
@@ -30,7 +33,7 @@ def rebuild(job: dict, workspace: Path, progress) -> dict:
         path = Path(value)
         if not path.is_file() and job["id"] in path.parts:
             path = workspace.joinpath(*path.parts[path.parts.index(job["id"]) + 1:])
-        if not path.is_file():
+        if wants_previews(job) and not path.is_file():
             raise FileNotFoundError("Uma gravação original não está mais disponível para revisar os cortes.")
         return path
 
@@ -43,6 +46,8 @@ def rebuild(job: dict, workspace: Path, progress) -> dict:
         if (workspace / "evidence").is_dir():
             shutil.copytree(workspace / "evidence", staging / "evidence")
         shutil.copy2(workspace / "transcricao.json", staging / "transcricao.json")
+        if (workspace / "fontes.json").is_file():
+            shutil.copy2(workspace / "fontes.json", staging / "fontes.json")
         if (workspace / "transcricao-aviso.txt").is_file():
             shutil.copy2(workspace / "transcricao-aviso.txt", staging / "transcricao-aviso.txt")
         (staging / "analise-visual.json").write_text(json.dumps(steps, ensure_ascii=False), encoding="utf-8")
@@ -50,14 +55,17 @@ def rebuild(job: dict, workspace: Path, progress) -> dict:
         if not transcript:
             documentation.setdefault("limitations", []).append("Não foi possível obter falas da gravação; a análise contextual por áudio precisa ser validada antes do uso operacional.")
             documentation["preview_moments"] = []
-        progress(50, "Aplicando os cortes revisados em cada gravação")
-        preview, source_previews = create_job_previews(video, source_videos, steps, staging, documentation.get("preview_moments", []))
+        if wants_previews(job):
+            progress(50, "Aplicando os cortes revisados em cada gravação")
+            preview, source_previews = create_job_previews(video, source_videos, steps, staging, documentation.get("preview_moments", []))
+        else:
+            preview, source_previews = {"created": False, "requested": False, "file": None, "ranges": []}, []
         progress(82, "Estruturando os documentos da revisão")
         write_report(job, steps, staging, video, documentation, source_previews)
         progress(94, "Preparando o pacote completo revisado")
         create_package(staging)
         warnings = [path.read_text(encoding="utf-8") for path in (staging / "transcricao-aviso.txt", staging / "documentacao-aviso.txt", staging / "documentacao-pdf-aviso.txt") if path.is_file()]
-        if not preview.get("created"):
+        if wants_previews(job) and not preview.get("created"):
             warnings.append("Nenhum preview contextual foi gerado. Consulte as limitações da documentação e revise o contexto ou a transcrição.")
         progress(98, "Finalizando a revisão")
         generated_names = {
@@ -66,6 +74,8 @@ def rebuild(job: dict, workspace: Path, progress) -> dict:
             "requisitos-rpa.md", "matriz-evidencias.csv", "preview-processo.mp4", "roteiro-cortes.json",
             "documentacao-aviso.txt", "documentacao-pdf-aviso.txt",
         }
+        generated_names.update(GENERAL_EXPORTS)
+        generated_names.update(INTERCHANGE_FILES)
         for name in generated_names:
             if not (staging / name).is_file():
                 (workspace / name).unlink(missing_ok=True)
@@ -83,7 +93,8 @@ def rebuild(job: dict, workspace: Path, progress) -> dict:
                 for artifact in path.iterdir():
                     if artifact.is_file():
                         artifact.replace(destination / artifact.name)
-    result.update(video=str(video), source_files=[str(path) for path in source_videos], process_step_count=len(documentation.get("process_flow", [])), preview=preview, previews=source_previews, warnings=warnings)
+    result.update(video=str(video), source_files=[str(path) for path in source_videos], process_step_count=item_count(documentation), preview=preview, previews=source_previews, warnings=warnings)
+    result["deliverables"] = [name for name, _, _ in document_catalog(job) if (workspace / name).is_file()] + ["relatorio.html"] + (["previews separados"] if wants_previews(job) else [])
     return result
 
 
@@ -137,8 +148,10 @@ class Orchestrator:
                 self.db.update(job_id, status="CANCELLED", stage="Cancelado", error=None)
                 self.db.event(job_id, "warning", "Processamento cancelado. Os arquivos enviados foram preservados.")
             except Exception as error:
-                if self.db.update_running(job_id, status="FAILED", stage="Falha no processamento", error=str(error)):
-                    self.db.event(job_id, "error", str(error))
+                log_failure("job_processing", error)
+                message = public_failure(error)
+                if self.db.update_running(job_id, status="FAILED", stage="Falha no processamento", error=message):
+                    self.db.event(job_id, "error", message)
                 elif self.db.status(job_id) == "CANCEL_REQUESTED":
                     self.db.update(job_id, status="CANCELLED", stage="Cancelado", error=None)
                     self.db.event(job_id, "warning", "Processamento cancelado. Os arquivos enviados foram preservados.")

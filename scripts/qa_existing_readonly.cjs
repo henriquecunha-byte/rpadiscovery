@@ -10,6 +10,13 @@ const fs=require('node:fs'),path=require('node:path'),assert=require('node:asser
  const mutations=[];page.on('request',r=>{if(r.method()!=='GET')mutations.push(r.method());});
  try{
   const health=await (await context.request.get(base+'/api/health')).json();
+  const auth=await (await context.request.get(base+'/api/auth/config')).json();
+  assert.equal(auth.enabled,false);assert.equal(auth.mode,'local');
+  await page.goto(base+'/');await page.evaluate(()=>window.DiscoveryAuth.ready);
+  assert.equal(await page.locator('#authView').isVisible(),true);
+  assert.equal(await page.locator('#loginSubmit').isDisabled(),true);
+  assert.equal(await page.locator('#continueLocal').isVisible(),true);
+  await page.screenshot({path:path.join(output,'final-login-local.png'),fullPage:true});
   const jobs=await (await context.request.get(base+'/api/jobs')).json();
   assert.ok(Array.isArray(jobs));
   await page.goto(base+'/#new');await page.waitForFunction(()=>document.querySelector('#healthLabel').textContent!=='Conectando…');await page.evaluate(()=>document.fonts.ready);
@@ -32,7 +39,7 @@ const fs=require('node:fs'),path=require('node:path'),assert=require('node:asser
    }
   }
   assert.deepEqual(mutations,[]);
-  const result={mode:'readonly',jobCount:jobs.length,missingDeliveriesChecked:missingChecked,retriesWithoutSourcesBlocked:retryBlocked,health:{worker:health.worker,ffmpeg:health.ffmpeg,ffprobe:health.ffprobe,api_configured:health.api_configured},mutations:mutations.length};
+  const result={mode:'readonly',auth:{mode:auth.mode,enabled:auth.enabled},jobCount:jobs.length,missingDeliveriesChecked:missingChecked,retriesWithoutSourcesBlocked:retryBlocked,health:{worker:health.worker,ffmpeg:health.ffmpeg,ffprobe:health.ffprobe,api_configured:health.api_configured},mutations:mutations.length};
   fs.writeFileSync(path.join(output,'existing-readonly-results.json'),JSON.stringify(result,null,2));console.log(JSON.stringify(result));
  }finally{await browser.close();}
 })().catch(error=>{console.error(error);process.exitCode=1;});

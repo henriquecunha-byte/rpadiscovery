@@ -1,0 +1,96 @@
+[
+  {
+    "name": "rpa_spec",
+    "contexto": {
+      "cliente": "Grupo Trevo",
+      "processo": "Gestão de pedidos",
+      "objetivo": "Reduzir a cópia manual.",
+      "solucoes": [
+        "rpa"
+      ],
+      "etapaDestino": "spec_rpa",
+      "publico": [
+        "rpa"
+      ],
+      "entregaveis": [
+        "prints_por_tela",
+        "fluxo_atual",
+        "campos_io"
+      ],
+      "sistemas": [
+        "WhatsApp",
+        "Excel"
+      ]
+    },
+    "guide": "Cliente: Grupo Trevo\nProcesso: Gestão de pedidos\nPor que está sendo mapeado: Reduzir a cópia manual.\n\nEste material alimenta a etapa \"Especificação de RPA\" de um projeto da btime.\nSolução em vista: RPA.\nQuem vai ler: Equipe de RPA.\nEscreva para quem vai construir o robô: tela a tela, com cada campo, ação e validação.\n\nO que a análise precisa entregar:\n- Fluxo atual, passo a passo\n- Campos, entradas e saídas de dados\n- Print de cada tela com descrição\n\nPara cada passo, registre a tela, o campo, a ação (clique, digitação, cópia, upload ou download), de onde vem o dado, para onde vai e o que acontece em caso de erro. Aponte os passos que dependem de julgamento humano.\n\nSistemas citados: WhatsApp, Excel.\n\nRegras de corte:\n- Mantenha todo trecho sobre \"Gestão de pedidos\", da pergunta inicial até o fim da resposta, incluindo contrapontos, exemplos, demonstrações de tela, decisões e próximos passos.\n- Descarte apenas trechos de outro assunto, saudação, espera, silêncio, problema técnico sem conteúdo e conversa paralela.\n\nRegras de evidência:\n- Registre sistemas, telas, campos, regras, exceções e números apenas quando aparecerem na tela ou forem ditos na gravação, com o minuto de referência.\n- O que estiver implícito vira \"ponto a validar com o cliente\". Não preencha lacunas com suposições."
+  },
+  {
+    "name": "indefinido_desenho",
+    "contexto": {
+      "cliente": "Cliente Exemplo",
+      "processo": "Atendimento",
+      "solucoes": [
+        "indefinido"
+      ],
+      "etapaDestino": "desenho",
+      "publico": [
+        "cliente"
+      ],
+      "entregaveis": [
+        "dores",
+        "oportunidades",
+        "perguntas_abertas"
+      ],
+      "sources": [
+        "nunca-incluir.mp4",
+        "outro.mov",
+        "fonte.webm"
+      ]
+    },
+    "guide": "Cliente: Cliente Exemplo\nProcesso: Atendimento\n\nEste material alimenta a etapa \"Desenho e validação da solução\" de um projeto da btime.\nSolução em vista: Ainda não definido.\nQuem vai ler: Cliente (validação).\nEscreva de forma que o cliente consiga validar: sem jargão técnico, com foco no fluxo, nas dores e nas oportunidades.\n\nO que a análise precisa entregar:\n- Dores nas palavras do cliente\n- Pontos com potencial de automação\n- Perguntas em aberto para validar com o cliente\n\nAo final, liste os trechos com maior potencial de automação e explique por quê.\n\nRegras de corte:\n- Mantenha todo trecho sobre \"Atendimento\", da pergunta inicial até o fim da resposta, incluindo contrapontos, exemplos, demonstrações de tela, decisões e próximos passos.\n- Descarte apenas trechos de outro assunto, saudação, espera, silêncio, problema técnico sem conteúdo e conversa paralela.\n\nRegras de evidência:\n- Registre sistemas, telas, campos, regras, exceções e números apenas quando aparecerem na tela ou forem ditos na gravação, com o minuto de referência.\n- O que estiver implícito vira \"ponto a validar com o cliente\". Não preencha lacunas com suposições."
+  },
+  {
+    "name": "ia_integracao_tecnica",
+    "contexto": {
+      "cliente": "Empresa Exemplo",
+      "processo": "Triagem de documentos",
+      "solucoes": [
+        "integracao",
+        "ia"
+      ],
+      "etapaDestino": "doc_tecnica",
+      "publico": [
+        "comercial",
+        "squad_ia"
+      ],
+      "entregaveis": [
+        "regras_excecoes",
+        "sistemas_telas"
+      ],
+      "instrucoesExtras": "O termo OS significa ordem de serviço."
+    },
+    "guide": "Cliente: Empresa Exemplo\nProcesso: Triagem de documentos\n\nEste material alimenta a etapa \"Documentação técnica\" de um projeto da btime.\nSolução em vista: Automação com IA, Integração entre sistemas.\nQuem vai ler: Squad de IA, Comercial / pré-venda.\nEscreva para a equipe técnica da btime: passo a passo numerado, com regras e exceções explícitas.\n\nO que a análise precisa entregar:\n- Sistemas e telas usados\n- Regras de negócio e exceções\n\nAponte as decisões que dependem de ler ou interpretar algo (documentos, mensagens, e-mails) e os critérios que a pessoa usa para decidir.\n\nRegistre qual dado sai de qual sistema e entra em qual, o formato e a frequência dessa troca.\n\nRegras de corte:\n- Mantenha todo trecho sobre \"Triagem de documentos\", da pergunta inicial até o fim da resposta, incluindo contrapontos, exemplos, demonstrações de tela, decisões e próximos passos.\n- Descarte apenas trechos de outro assunto, saudação, espera, silêncio, problema técnico sem conteúdo e conversa paralela.\n\nRegras de evidência:\n- Registre sistemas, telas, campos, regras, exceções e números apenas quando aparecerem na tela ou forem ditos na gravação, com o minuto de referência.\n- O que estiver implícito vira \"ponto a validar com o cliente\". Não preencha lacunas com suposições.\n\nInstruções adicionais:\nO termo OS significa ordem de serviço."
+  },
+  {
+    "name": "flow_dados_sensiveis",
+    "contexto": {
+      "cliente": "Empresa Alfa",
+      "processo": "Aprovações",
+      "solucoes": [
+        "flow"
+      ],
+      "etapaDestino": "doc_tecnica",
+      "publico": [
+        "outro",
+        "dev_flow"
+      ],
+      "publicoOutro": "Operações",
+      "entregaveis": [
+        "fluxo_atual",
+        "regras_excecoes"
+      ],
+      "dadosSensiveis": true
+    },
+    "guide": "Cliente: Empresa Alfa\nProcesso: Aprovações\n\nEste material alimenta a etapa \"Documentação técnica\" de um projeto da btime.\nSolução em vista: Módulo no btime Flow.\nQuem vai ler: Dev btime Flow, Operações.\nEscreva para a equipe técnica da btime: passo a passo numerado, com regras e exceções explícitas.\n\nO que a análise precisa entregar:\n- Fluxo atual, passo a passo\n- Regras de negócio e exceções\n\nRegistre quem executa cada etapa, as aprovações, os status e os formulários usados. Eles viram telas e fluxos no btime Flow.\n\nRegras de corte:\n- Mantenha todo trecho sobre \"Aprovações\", da pergunta inicial até o fim da resposta, incluindo contrapontos, exemplos, demonstrações de tela, decisões e próximos passos.\n- Descarte apenas trechos de outro assunto, saudação, espera, silêncio, problema técnico sem conteúdo e conversa paralela.\n\nRegras de evidência:\n- Registre sistemas, telas, campos, regras, exceções e números apenas quando aparecerem na tela ou forem ditos na gravação, com o minuto de referência.\n- O que estiver implícito vira \"ponto a validar com o cliente\". Não preencha lacunas com suposições.\n- As gravações mostram dados pessoais. Na transcrição e na documentação, troque CPF, nomes de pessoas, dados de saúde e valores de clientes por marcadores ([CPF], [NOME], [DADO DE SAÚDE], [VALOR]). Sinalize cada print que mostre esses dados."
+  }
+]

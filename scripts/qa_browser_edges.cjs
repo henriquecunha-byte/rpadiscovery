@@ -12,6 +12,7 @@ const results=[];
  const errors=[];page.on('pageerror',error=>errors.push(error.message));
  async function check(name,work){try{await work();results.push({name,status:'PASS'});console.log('PASS '+name);}catch(e){results.push({name,status:'FAIL',error:e.message});console.log('FAIL '+name+': '+e.message);await page.screenshot({path:path.join(output,'edge-failure-'+results.length+'.png'),fullPage:true});}}
  async function confirm(yes=true){await page.locator('#confirmDialog').waitFor({state:'visible'});await page.locator(yes?'#acceptConfirm':'#rejectConfirm').click();await page.locator('#confirmDialog').waitFor({state:'hidden'});}
+ async function fillContext(process,guide){await page.locator('#perfil').selectOption('processo');await page.locator('#cliente').fill('Grupo Trevo');await page.locator('#processo').fill(process);await page.locator('input[name="solucoes"][value="rpa"]').check();await page.locator('input[name="publico"][value="rpa"]').check();if(await page.locator('#toggleGuide').getAttribute('aria-expanded')==='false')await page.locator('#toggleGuide').click();if(await page.locator('#context').getAttribute('readonly')!==null)await page.locator('#editGuide').click();await page.locator('#context').fill(guide);}
  try{
  await page.route('**/api/drive/status',r=>r.fulfill({json:{connected:true,configured:true}}));
  await page.route('**/api/drive/files?*',r=>r.fulfill({json:r.request().url().includes('folder_id=folder-1')?[{id:'zip-1',name:'reunioes.zip',size:123456,mimeType:'application/zip'}]:[{id:'folder-1',name:'Reuniões de discovery',mimeType:'application/vnd.google-apps.folder'},{id:'video-1',name:'Trevo.mp4',size:500000,mimeType:'video/mp4'}]}));
@@ -51,14 +52,14 @@ const results=[];
  });
  await check('Rejected import keeps sources, authorization and editable context',async()=>{
   await page.route('**/api/jobs/drive-import',r=>r.fulfill({status:400,json:{detail:'Teste: arquivo do Drive indisponível.'}}));
-  await page.locator('#nextStep').click();await page.locator('#title').fill('QA de importação');await page.locator('#context').fill('Documentar regras e exceções do processo da Trevo.');await page.locator('#nextStep').click();await page.locator('#approved').check();await page.locator('#submitJob').click();
+  await page.locator('#nextStep').click();await fillContext('QA de importação','Documentar regras e exceções do processo da Trevo.');await page.locator('#nextStep').click();await page.locator('#approved').check();await page.locator('#submitJob').click();
   await page.waitForFunction(()=>document.querySelector('#error').textContent.includes('indisponível'));
   assert.equal(await page.locator('#submitJob').isEnabled(),true);assert.equal(await page.locator('#approved').isChecked(),true);
   await page.locator('#previousStep').click();assert.equal(await page.locator('#context').inputValue(),'Documentar regras e exceções do processo da Trevo.');
  });
  await check('Delayed prompt suggestion cannot overwrite intervening edits without confirmation',async()=>{
   let release;const gate=new Promise(resolve=>release=resolve);
-  await page.route('**/api/prompt/suggest',async r=>{await gate;await r.fulfill({json:{prompt:'Sugestão substituta para validar confirmação.',generated:true}});});
+  await page.route('**/api/prompt/suggest',async r=>{await gate;await r.fulfill({json:{ok:true,prompt:'Sugestão substituta para validar confirmação.'}});});
   await page.locator('#suggestPrompt').click();await page.locator('#context').fill('Meu guia editado enquanto aguardo a resposta.');release();await confirm(false);
   assert.equal(await page.locator('#context').inputValue(),'Meu guia editado enquanto aguardo a resposta.');
  });
