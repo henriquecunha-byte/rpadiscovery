@@ -63,7 +63,7 @@ class PipelineQATests(unittest.TestCase):
             (workspace / "evidence").mkdir()
             (workspace / "evidence" / "frame.jpg").write_bytes(b"synthetic-image")
             response = SimpleNamespace(output_text=json.dumps({"steps": [None, "wrong", {"frame_index": 99}, {"frame_index": "1", "title": "Confirmado"}]}))
-            with patch("rpa_docs.pipeline.OpenAI") as client:
+            with patch("rpa_docs.pipeline.create_client") as client:
                 client.return_value.responses.create.return_value = response
                 result = analyze([{"index": 1, "time": 10, "image": "frame.jpg"}], [], workspace, "Processo", "operacional")
             self.assertEqual(len(result), 1)

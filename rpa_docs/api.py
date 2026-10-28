@@ -20,6 +20,7 @@ from .auth import install_auth
 from .access import AccessScope, current_access, require_local_drive
 from .database import Database
 from .errors import log_failure
+from .ai import is_configured as ai_is_configured
 from .orchestrator import Orchestrator
 from .schemas import DriveImport, DriveUpload, JobCreate, PromptSuggestion
 from .pipeline import VIDEO_EXTENSIONS, suggest_process_prompt, write_pdf_document
@@ -273,7 +274,7 @@ def health():
     return {
         "status": "ok", "worker": worker.thread.is_alive(),
         "ffmpeg": bool(shutil.which(FFMPEG)), "ffprobe": bool(shutil.which(FFPROBE)),
-        "api_configured": bool(os.getenv("OPENAI_API_KEY", "").strip()),
+        "api_configured": ai_is_configured(),
     }
 
 

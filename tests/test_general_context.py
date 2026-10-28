@@ -56,7 +56,7 @@ class GeneralContextTests(unittest.TestCase):
 
     def test_detail_labels_are_neutral_in_guide_and_every_ai_prompt(self):
         for stored, label in (("operacional", "equilibrado"), (None, "equilibrado"), ("resumido", "resumido"), ("detalhado", "detalhado")):
-            with self.subTest(stored=stored), tempfile.TemporaryDirectory() as temporary, patch("rpa_docs.pipeline.OpenAI") as client:
+            with self.subTest(stored=stored), tempfile.TemporaryDirectory() as temporary, patch("rpa_docs.pipeline.create_client") as client:
                 job = {"title": "Aula", "detail_level": stored}
                 self.assertIn(f"com detalhamento {label}", fallback_process_prompt(job))
                 client.return_value.responses.create.return_value = SimpleNamespace(output_text="Mantenha as explicações da aula com ideias completas e evidências verificáveis.")
@@ -84,7 +84,7 @@ class GeneralContextTests(unittest.TestCase):
     def test_suggestion_instruction_is_general_and_preserves_requested_choices(self):
         guide = "Somente perguntas sobre o livro; não inclua publicidade."
         generated = "Objetivo: analisar a entrevista literária e preservar as perguntas e respostas completas sobre o livro."
-        with patch("rpa_docs.pipeline.OpenAI") as client:
+        with patch("rpa_docs.pipeline.create_client") as client:
             client.return_value.responses.create.return_value = SimpleNamespace(output_text=generated)
             result = suggest_process_prompt({"title": "Entrevista literária", "process_context": guide, "audience": "Leitores"})
         messages = client.return_value.responses.create.call_args.kwargs["input"]
@@ -104,7 +104,7 @@ class GeneralContextTests(unittest.TestCase):
     def test_status_warnings_are_actionable_without_provider_details(self):
         expected = {401: "credencial", 403: "permissões", 429: "limite", 503: "temporariamente", 400: "Não foi possível"}
         for status, fragment in expected.items():
-            with self.subTest(status=status), patch("rpa_docs.pipeline.OpenAI", side_effect=ProviderFailure(status)):
+            with self.subTest(status=status), patch("rpa_docs.pipeline.create_client", side_effect=ProviderFailure(status)):
                 result = suggest_process_prompt({"title": "Aula de desenho"})
                 self.assertEqual(result, {"ok": False, "code": "ai_unavailable"})
                 self.assertIn(fragment, safe_ai_warning(ProviderFailure(status)))
@@ -115,7 +115,7 @@ class GeneralContextTests(unittest.TestCase):
     def test_sdk_authentication_error_does_not_expose_key_or_request_url(self):
         request = httpx.Request("POST", "https://private.invalid/responses")
         error = AuthenticationError("Incorrect API key SENSITIVE_API_KEY", response=httpx.Response(401, request=request), body={"error": "SENSITIVE_API_KEY"})
-        with patch("rpa_docs.pipeline.OpenAI", side_effect=error):
+        with patch("rpa_docs.pipeline.create_client", side_effect=error):
             result = suggest_process_prompt({"title": "Entrevista"})
         self.assertEqual(result, {"ok": False, "code": "ai_unavailable"})
         self.assertNotIn("SENSITIVE_API_KEY", json.dumps(result))
@@ -143,14 +143,14 @@ class GeneralContextTests(unittest.TestCase):
         self.assertIn("Não foi possível", safe_ai_warning(PrivateError()))
 
     def test_invalid_short_response_does_not_replace_the_existing_guide(self):
-        with patch("rpa_docs.pipeline.OpenAI") as client:
+        with patch("rpa_docs.pipeline.create_client") as client:
             client.return_value.responses.create.return_value = SimpleNamespace(output_text="short")
             result = suggest_process_prompt({"title": "Pesquisa", "process_context": "Mapeie dúvidas sobre transporte."})
         self.assertEqual(result, {"ok": False, "code": "ai_unavailable"})
 
     def test_synthesis_keeps_schema_but_does_not_impose_rpa_on_other_subjects(self):
         guide = "Explique os conceitos discutidos na aula de astronomia."
-        with tempfile.TemporaryDirectory() as temporary, patch("rpa_docs.pipeline.OpenAI") as client:
+        with tempfile.TemporaryDirectory() as temporary, patch("rpa_docs.pipeline.create_client") as client:
             client.return_value.responses.create.return_value = SimpleNamespace(output_text='{"executive_summary":"Aula sobre estrelas","objective":"Estudar estrelas"}')
             result = synthesize_documentation({"title": "Aula", "process_context": guide}, [], [{"start": 0, "end": 15, "text": "Vamos estudar estrelas."}], Path(temporary))
         instruction = client.return_value.responses.create.call_args.kwargs["input"]
@@ -163,7 +163,7 @@ class GeneralContextTests(unittest.TestCase):
         self.assertEqual(set(result), set(fallback_documentation({}, [])))
 
     def test_synthesis_warning_and_exported_limitations_never_include_raw_ai_error(self):
-        with tempfile.TemporaryDirectory() as temporary, patch("rpa_docs.pipeline.OpenAI", side_effect=ProviderFailure(401)):
+        with tempfile.TemporaryDirectory() as temporary, patch("rpa_docs.pipeline.create_client", side_effect=ProviderFailure(401)):
             workspace = Path(temporary)
             result = synthesize_documentation({"title": "Aula"}, [], [], workspace)
             warning = (workspace / "documentacao-aviso.txt").read_text(encoding="utf-8")
@@ -174,7 +174,7 @@ class GeneralContextTests(unittest.TestCase):
         self.assertEqual(result["preview_moments"], [])
 
     def test_visual_prompt_follows_the_guide_without_a_fixed_operational_subject(self):
-        with tempfile.TemporaryDirectory() as temporary, patch("rpa_docs.pipeline.OpenAI") as client:
+        with tempfile.TemporaryDirectory() as temporary, patch("rpa_docs.pipeline.create_client") as client:
             workspace = Path(temporary)
             (workspace / "evidence").mkdir()
             (workspace / "evidence" / "frame.jpg").write_bytes(b"synthetic-frame")
@@ -188,7 +188,7 @@ class GeneralContextTests(unittest.TestCase):
         self.assertEqual(result, [])
 
     def test_visual_provider_failure_does_not_reach_job_history_as_raw_error(self):
-        with tempfile.TemporaryDirectory() as temporary, patch("rpa_docs.pipeline.OpenAI", side_effect=ProviderFailure(401)):
+        with tempfile.TemporaryDirectory() as temporary, patch("rpa_docs.pipeline.create_client", side_effect=ProviderFailure(401)):
             workspace = Path(temporary)
             (workspace / "evidence").mkdir()
             (workspace / "evidence" / "frame.jpg").write_bytes(b"synthetic-frame")

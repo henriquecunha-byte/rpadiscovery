@@ -13,8 +13,9 @@ import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from openai import APIConnectionError, APIError, APITimeoutError, AuthenticationError, OpenAI, RateLimitError
+from openai import APIConnectionError, APIError, APITimeoutError, AuthenticationError, RateLimitError
 
+from .ai import create_client, model_name
 from .config import FFMPEG, FFPROBE
 from .documentation_profiles import (GENERAL_FILES, GENERAL_EXPORTS, PROFILES, document_catalog, fallback_general, general_contract,
     general_html, general_job, item_count, normalize_general, profile_id,
@@ -180,7 +181,7 @@ def nearby_transcript(transcript: list[dict], timestamp: float, radius: float = 
 
 
 def analyze(evidence: list[dict], transcript: list[dict], workspace: Path, context: str, detail: str) -> list[dict]:
-    model = os.getenv("OPENAI_MODEL", "gpt-5.6-luna")
+    model = model_name()
     batches = [evidence[start:start + 10] for start in range(0, len(evidence), 10)]
 
     def analyze_batch(batch: list[dict]) -> list[dict]:
@@ -202,7 +203,7 @@ def analyze(evidence: list[dict], transcript: list[dict], workspace: Path, conte
             content.append({"type": "input_text", "text": f"Frame {item['index']} em {format_time(item['time'])}. Fala próxima: {nearby_transcript(transcript, item['time']) or 'sem fala detectada'}"})
             content.append({"type": "input_image", "image_url": f"data:image/jpeg;base64,{encoded}", "detail": "low"})
         try:
-            client = OpenAI()
+            client = create_client()
             response = client.responses.create(model=model, input=[{"role": "user", "content": content}])
         except Exception as error:
             # The worker persists errors in job history; do not persist provider
@@ -400,12 +401,12 @@ Retorne JSON puro exatamente com esta estrutura:
   "limitations": ["..."]
 }}'''
     try:
-        client = OpenAI()
+        client = create_client()
         if general_job(job):
             prompt = prompt.split("Retorne JSON puro exatamente com esta estrutura:")[0]
             prompt = prompt.replace("- Preserve o contrato JSON abaixo. Use process_flow para organizar as etapas ou a sequência de tópicos relevantes ao objetivo. Campos de negócio ou automação que não se apliquem devem ficar vazios; não invente um processo ou oportunidades de RPA para preenchê-los.", "- Use o contrato próprio do perfil ao final. Organize o conteúdo nas seções solicitadas e preserve o contexto das explicações.")
             prompt += general_contract(job)
-        response = client.responses.create(model=os.getenv("OPENAI_MODEL", "gpt-5.6-luna"), input=prompt)
+        response = client.responses.create(model=model_name(), input=prompt)
         text = response.output_text.strip().removeprefix("```json").removesuffix("```").strip()
         if not text.startswith("{"):
             text = text[text.find("{"):text.rfind("}") + 1]
@@ -520,9 +521,9 @@ def suggest_process_prompt(job: dict) -> dict:
                 "titulo": job.get("title") or "", "publico": job.get("audience") or "",
                 "nivel": _context_detail_label(job.get("detail_level")),
             }
-        client = OpenAI()  # Reads OPENAI_API_KEY from the environment only.
+        client = create_client()
         response = client.responses.create(
-            model=os.getenv("OPENAI_MODEL", "gpt-5.6-luna"),
+            model=model_name(),
             input=[{"role": "system", "content": instruction},
                    {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}],
         )

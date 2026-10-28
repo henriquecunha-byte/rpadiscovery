@@ -20,6 +20,8 @@ _OPERATIONS = frozenset({
     "drive_connect", "drive_callback", "drive_files", "drive_import", "drive_upload",
 })
 MESSAGES = {
+    "ai_configuration": "O serviço de IA não está configurado neste ambiente. Peça à pessoa responsável para verificar o provedor e a credencial no servidor.",
+    "ai_credits": "O projeto ficou sem créditos de IA. Peça à pessoa responsável para verificar o saldo no Lovable e depois retome a análise.",
     "processing": "Não foi possível concluir o processamento. Os arquivos enviados foram preservados. Tente retomar a análise; se persistir, peça à pessoa responsável pelo ambiente para verificar a configuração.",
     "access": "O ambiente não conseguiu acessar um arquivo necessário. Os arquivos enviados foram preservados. Peça à pessoa responsável para revisar as permissões antes de retomar.",
     "missing_file": "Um arquivo necessário não está disponível no ambiente. Verifique as gravações e os arquivos de trabalho antes de retomar a análise.",
@@ -50,10 +52,12 @@ class PublicProcessingError(RuntimeError):
 
 
 def ai_failure_code(error: Exception) -> str:
+    if isinstance(error, PublicProcessingError) and error.code.startswith("ai_"):
+        return error.code
     status = getattr(error, "status_code", None)
     if type(status) is int:
-        if status in {401, 403, 429}:
-            return {401: "ai_credential", 403: "ai_permission", 429: "ai_limit"}[status]
+        if status in {401, 402, 403, 429}:
+            return {401: "ai_credential", 402: "ai_credits", 403: "ai_permission", 429: "ai_limit"}[status]
         if status >= 500:
             return "ai_unavailable"
     if isinstance(error, (APITimeoutError, TimeoutError)):

@@ -289,6 +289,22 @@ class ApiTests(unittest.TestCase):
             self.assertIsInstance(response.json()[key], bool)
         self.assertIn("no-store", self.client.get("/").headers["cache-control"])
 
+    def test_health_tracks_selected_ai_provider_without_exposing_credentials(self):
+        for provider, lovable_key, old_key, expected in (
+            ("lovable", "", "qa-old-secret", False),
+            ("lovable", "qa-cloud-secret", "", True),
+            ("openai", "qa-cloud-secret", "", False),
+            ("openai", "", "qa-old-secret", True),
+            ("invalid", "qa-cloud-secret", "qa-old-secret", False),
+        ):
+            with self.subTest(provider=provider, expected=expected), patch.dict("os.environ", {
+                "AI_PROVIDER": provider, "LOVABLE_API_KEY": lovable_key, "OPENAI_API_KEY": old_key,
+            }):
+                response = self.client.get("/api/health")
+                self.assertEqual(response.status_code, 200)
+                self.assertIs(response.json()["api_configured"], expected)
+                self.assertNotIn("secret", response.text)
+
     @staticmethod
     def structured_context(**changes):
         return {"cliente": "Cliente de QA", "processo": "Conciliação", "solucoes": ["integracao"],

@@ -40,7 +40,7 @@ class SafeFailureTests(unittest.TestCase):
             UnprintableError(),
         )
         for failure in failures:
-            with self.subTest(type=type(failure).__name__), patch("rpa_docs.pipeline.OpenAI", side_effect=failure), self.assertLogs("rpa_docs.failures") as captured:
+            with self.subTest(type=type(failure).__name__), patch("rpa_docs.pipeline.create_client", side_effect=failure), self.assertLogs("rpa_docs.failures") as captured:
                 result = suggest_process_prompt({"contexto": {"cliente": "Cliente", "processo": "Pedidos"}})
             self.assertEqual(result, {"ok": False, "code": "ai_unavailable"})
             self.assertEqual(len(captured.records), 1)
@@ -65,7 +65,7 @@ class SafeFailureTests(unittest.TestCase):
                    "entregaveis": ["fluxo_atual"], "instrucoesExtras": "Não inclua faturamento.",
                    "sources": ["private-recording.mp4"], "source_path": "private-recording.mov"}
         guide = compile_guide(context)
-        with patch("rpa_docs.pipeline.OpenAI") as client:
+        with patch("rpa_docs.pipeline.create_client") as client:
             client.return_value.responses.create.return_value = SimpleNamespace(output_text="Organize com clareza o processo de pedidos para a equipe técnica.")
             result = suggest_process_prompt({"contexto": context, "process_context": guide, "sources": ["secret.webm"]})
         messages = client.return_value.responses.create.call_args.kwargs["input"]
@@ -85,7 +85,7 @@ class SafeFailureTests(unittest.TestCase):
             self.assertIn(instruction, messages[0]["content"])
 
     def test_partial_context_can_improve_without_destination_or_audience(self):
-        with patch("rpa_docs.pipeline.OpenAI") as client:
+        with patch("rpa_docs.pipeline.create_client") as client:
             client.return_value.responses.create.return_value = SimpleNamespace(output_text="Analise o processo de pedidos do cliente conforme o conteúdo da reunião.")
             result = suggest_process_prompt({"contexto": {"cliente": "Cliente", "processo": "Pedidos"}})
         self.assertTrue(result["ok"])
@@ -94,7 +94,7 @@ class SafeFailureTests(unittest.TestCase):
     def test_sensitive_data_rule_and_manual_exclusions_cannot_be_dropped_by_model(self):
         guide = "Não inclua faturamento. Preserve a decisão final, mesmo quando a tela mudar."
         context = {"cliente": "Cliente", "processo": "Pedidos", "dadosSensiveis": True, "guiaEditado": True}
-        with patch("rpa_docs.pipeline.OpenAI") as client:
+        with patch("rpa_docs.pipeline.create_client") as client:
             client.return_value.responses.create.return_value = SimpleNamespace(output_text="Organize as informações sobre pedidos com objetividade e clareza.")
             result = suggest_process_prompt({"contexto": context, "process_context": guide})
         self.assertTrue(result["ok"])
@@ -103,7 +103,7 @@ class SafeFailureTests(unittest.TestCase):
             self.assertIn(marker, result["prompt"])
 
     def test_overlong_response_is_not_truncated_or_returned_as_success(self):
-        with patch("rpa_docs.pipeline.OpenAI") as client:
+        with patch("rpa_docs.pipeline.create_client") as client:
             client.return_value.responses.create.return_value = SimpleNamespace(output_text="x" * 8000)
             result = suggest_process_prompt({"contexto": {"cliente": "Cliente", "processo": "Pedidos"}})
         self.assertEqual(result, {"ok": False, "code": "ai_unavailable"})

@@ -2,6 +2,8 @@
 
 Aplicativo local para transformar gravações em documentos para diferentes áreas, cruzando transcrição, evidências visuais e o contexto de cada pedido. O pacote Python e os caminhos históricos mantêm o nome `rpa_docs` por compatibilidade.
 
+O provedor padrão de IA é agora o **Lovable**. Este repositório ainda executa o worker Python, SQLite e arquivos locais; configurar o gateway não migra dados nem publica esse worker no Lovable Cloud. A separação entre as duas partes está em [Integração com Lovable](docs/LOVABLE-INTEGRATION.md).
+
 ## Funcionalidades
 
 - fila local de trabalhos e histórico em SQLite;
@@ -39,7 +41,7 @@ Aplicativo local para transformar gravações em documentos para diferentes áre
 - A gravação original nunca é alterada.
 - Cada descrição aponta para um print e um momento da gravação.
 - A análise deve declarar incerteza e não inferir cliques ou valores invisíveis.
-- A chave fica apenas no arquivo local `.env`, ignorado pelo Git.
+- As credenciais ficam apenas no ambiente do servidor; o `.env` local é ignorado pelo Git. No Lovable Cloud, a credencial do projeto é gerenciada como segredo.
 - O JSON intermediário sustenta as exportações em Word, PDF e template Btime.
 
 ## Execução
@@ -67,9 +69,11 @@ O botão **Melhorar com IA** usa o contexto e o guia atual. O pedido orienta a o
 
 Os perfis gerais exportam `documentacao.docx`, `documentacao.pdf` e `documentacao.json`, além do Markdown correspondente ao perfil. Não geram requisitos de RPA. Trabalhos antigos mantêm os arquivos e links anteriores. Consulte o [plano, contratos e QA multiarea](docs/MULTI-AREA-PLAN.md).
 
-Sem `OPENAI_API_KEY` configurada, o botão devolve um prompt base montado localmente com as mesmas regras e avisa que a API não respondeu. O texto sempre pode ser editado antes de criar a documentação.
+Sem a credencial do provedor selecionado, **Melhorar com IA** informa a indisponibilidade e preserva o guia atual. O texto continua editável. No padrão `AI_PROVIDER=lovable`, somente `LOVABLE_API_KEY` habilita as chamadas; uma chave antiga da OpenAI não é utilizada automaticamente.
 
 Falhas da IA aparecem como avisos legíveis, sem incluir a chave nem a resposta técnica bruta do provedor. Após alterar o `.env`, reinicie o servidor para carregar a nova configuração.
+
+O modelo é definido por `LOVABLE_MODEL` (padrão `openai/gpt-5.6-luna`, preservando a família antes utilizada). O nome do modelo não muda o faturamento: as chamadas são feitas pelo gateway Lovable. O modo direto legado exige `AI_PROVIDER=openai` explícito e usa `OPENAI_API_KEY` e `OPENAI_MODEL`. Não há troca automática de provedor em caso de erro ou falta de créditos.
 
 ## Downloads da entrega
 

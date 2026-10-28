@@ -87,7 +87,7 @@ class ProfileTests(unittest.TestCase):
             if profile == "processo":
                 continue
             job = JobCreate(contexto=profile_context(profile), source_path="synthetic.mp4").model_dump()
-            with self.subTest(profile=profile), tempfile.TemporaryDirectory() as directory, patch("rpa_docs.pipeline.OpenAI") as client:
+            with self.subTest(profile=profile), tempfile.TemporaryDirectory() as directory, patch("rpa_docs.pipeline.create_client") as client:
                 client.return_value.responses.create.return_value = SimpleNamespace(output_text=json.dumps(sample_document(job)))
                 result = synthesize_documentation(job, [], [{"start": 5, "end": 10, "text": "A campanha está aprovada."}], Path(directory))
                 prompt = client.return_value.responses.create.call_args.kwargs["input"]
@@ -99,7 +99,7 @@ class ProfileTests(unittest.TestCase):
 
     def test_bad_provider_schema_falls_back_honestly(self):
         job = JobCreate(contexto=profile_context("reuniao"), source_path="synthetic.mp4").model_dump()
-        with tempfile.TemporaryDirectory() as directory, patch("rpa_docs.pipeline.OpenAI") as client:
+        with tempfile.TemporaryDirectory() as directory, patch("rpa_docs.pipeline.create_client") as client:
             client.return_value.responses.create.return_value = SimpleNamespace(output_text='{"process_flow": []}')
             result = synthesize_documentation(job, [], [], Path(directory))
             self.assertTrue((Path(directory) / "documentacao-aviso.txt").exists())

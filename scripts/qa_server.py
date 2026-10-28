@@ -20,6 +20,8 @@ cache.mkdir(exist_ok=True)
 qa_root = Path(tempfile.mkdtemp(prefix="ui-qa-", dir=cache))
 os.environ["RPA_DATA_ROOT"] = str(qa_root)
 os.environ["OPENAI_API_KEY"] = ""
+os.environ["LOVABLE_API_KEY"] = ""
+os.environ["AI_PROVIDER"] = "lovable"
 os.environ["GOOGLE_CLIENT_ID"] = ""
 os.environ["GOOGLE_CLIENT_SECRET"] = ""
 
