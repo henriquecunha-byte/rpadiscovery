@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+ <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+ <title>Contexto da análise — btime Discovery</title>
+ <link rel="stylesheet" href="./styles.css"><link rel="stylesheet" href="./context-form.css"><link rel="stylesheet" href="./context-preview.css">
+ <script src="./context-model.js" defer></script><script src="./context-form.js" defer></script><script src="./context-preview.js" defer></script>
+</head>
+<body>
+ <a class="skip-link" href="#contextMain">Pular para o contexto</a>
+ <header class="context-export-header"><span class="context-export-brand">btime <span>Discovery</span></span><span class="caption">Transforme gravações em documentos.</span></header>
+ <main id="contextMain" class="context-export" tabindex="-1">
+  <header class="context-export-intro"><span class="eyebrow">NOVA ANÁLISE</span><h1>O contexto do seu pedido.</h1><p>Defina o assunto, quem vai ler e o que precisa sair das gravações.</p></header>
+  <p id="contextLoadStatus" class="notice subtle" role="status">Carregando o formulário…</p>
+  <form id="contextExportForm" class="context-export-card" novalidate hidden>
+   <!-- DISCOVERY_CONTEXT_FORM -->
+   <footer class="form-footer"><span class="caption">As gravações são adicionadas no aplicativo.</span><button id="contextReview" type="submit" class="button primary">Revisar pedido →</button></footer>
+  </form>
+  <section id="contextExportReview" class="context-export-card" aria-labelledby="contextReviewTitle" hidden>
+   <div class="section-heading"><h2 id="contextReviewTitle" tabindex="-1">Confira o que será pedido</h2><p>Revise os itens e o guia antes de usar o contexto na análise.</p></div>
+   <dl id="contextSummary" class="context-review"></dl>
+   <p id="contextSensitiveNotice" class="notice subtle" hidden>O pedido inclui orientação para dados sensíveis. Revise os materiais antes de compartilhar; essa opção não anonimiza os arquivos automaticamente.</p>
+   <label for="contextGuidePreview">Guia da análise</label><textarea id="contextGuidePreview" class="context-export-guide" rows="15" readonly></textarea>
+   <p id="contextExportStatus" class="context-help" role="status" aria-live="polite"></p>
+   <footer class="form-footer"><button id="contextBack" type="button" class="button secondary">← Editar contexto</button><button id="contextCopy" type="button" class="button secondary">Copiar guia</button><button id="contextConfirm" type="button" class="button primary">Confirmar contexto</button></footer>
+  </section>
+ </main>
+</body>
+</html>

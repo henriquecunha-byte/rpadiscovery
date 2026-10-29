@@ -63,6 +63,12 @@ O isolamento por proprietário já está implementado no SQLite e nas rotas: uma
 
 ## Contexto personalizado por pedido
 
+### Fluxo apresentado na reunião de 14/10
+
+Para reproduzir o caminho mostrado ao Hiago, selecione **Processo / RPA** em **Tipo de documentação**. Esse perfil exibe soluções, etapa de destino e o checklist de entregáveis. Reunião, Treinamento, Entrevista, Pesquisa e Personalizado usam seus próprios itens; não exigem preencher um projeto de automação.
+
+Há uma [referência funcional somente da interface](integrations/context-ui/README.md) para reaplicar categorização, checklist, guia e revisão no frontend existente, preservando API e banco. Ela é gerada dos mesmos arquivos do app. O [mapeamento da gravação e QA](docs/RECONSTRUCAO-DISCOVERY-2026-10-29.md) registra o que foi apresentado, as melhorias posteriores mantidas e os limites da integração.
+
 Na etapa **Contexto**, escolha o tipo de documentação. Novos pedidos começam em **Personalizado**; **Área ou projeto** é opcional nos perfis gerais. Cliente, solução e etapa técnica aparecem no perfil **Processo / RPA**. O público, o objetivo, os entregáveis e o guia continuam personalizados por pedido.
 
 O botão **Melhorar com IA** usa o contexto e o guia atual. O pedido orienta a organização do conteúdo e os trechos que ficam nos previews: ideias completas e falas relevantes são preservadas, sem meta artificial de duração. Trocar de perfil preserva o guia editado manualmente e sinaliza que ele deve ser revisado. Rascunhos e análises antigos sem perfil permanecem em Processo / RPA.
@@ -88,7 +94,7 @@ Quando a transcrição ou a síntese estiver indisponível, a entrega declara a 
 ## Uso do painel
 
 1. Em **Nova análise**, adicione as fontes; a pilha é incremental. Para alternar entre computador e Drive, confirme a troca da seleção.
-2. Preencha cliente, processo, soluções, etapa, público e entregáveis. O guia de análise e cortes é gerado pelos campos; você pode acrescentar instruções, editar manualmente ou melhorar com IA. No modo local, o rascunho textual fica neste navegador; arquivos e autorização não são restaurados após fechar a página. Nas sessões autenticadas, o rascunho permanece apenas na sessão.
+2. Escolha o tipo de documentação, informe o assunto, o público e os entregáveis. No perfil Processo / RPA, preencha também cliente, soluções e etapa. O guia de análise e cortes é gerado pelos campos; você pode acrescentar instruções, editar manualmente ou melhorar com IA. No modo local, o rascunho textual fica neste navegador; arquivos e autorização não são restaurados após fechar a página. Nas sessões autenticadas, o rascunho permanece apenas na sessão.
 3. Revise e autorize o uso da API. Aguarde o upload terminar antes de fechar a página.
 4. Em **Minhas análises**, busque e filtre os pedidos. Cancelar preserva as fontes; retomar reaproveita os arquivos recebidos. O cancelamento de uma etapa longa aguarda um ponto seguro.
 5. A limpeza pede confirmação e remove somente trabalhos com falha ou cancelados e seus arquivos locais. Não é uma ação reversível pelo aplicativo.

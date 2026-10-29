@@ -1,0 +1,11 @@
+/* Only the reusable context/review surface; no navigation or backend settings. */
+.skip-link:not(:focus){clip-path:inset(50%);width:1px;height:1px;overflow:hidden;white-space:nowrap}
+.context-export-header{display:flex;justify-content:space-between;align-items:center;gap:24px;max-width:1264px;margin:auto;padding:28px 32px;border-bottom:1px solid var(--divider)}
+.context-export-brand{font-size:26px;font-weight:600;letter-spacing:-.04em}.context-export-brand span{margin-left:10px;font-size:16px;font-weight:400;color:var(--muted);letter-spacing:0}
+.context-export{max-width:1264px;margin:0 auto;padding:48px 32px 64px}.context-export-intro{margin-bottom:32px}.context-export-intro h1{margin:10px 0 12px}.context-export-intro p{color:var(--muted)}
+.context-export-card{padding:32px;background:var(--white);border:1px solid var(--divider);border-radius:var(--radius);box-shadow:var(--shadow)}
+.context-export-card .section-heading{margin-bottom:28px}.context-export-card .form-step{margin:0;padding:0;border:0;min-inline-size:0}
+.context-export-guide{width:100%;margin-top:10px;resize:vertical}.context-export-card .form-footer{gap:16px;flex-wrap:wrap}
+/* These IDs remain for the shared controller, but the export has no AI action. */
+#suggestPromptHelp,#suggestPromptRequirement,#promptHint{display:none!important}
+@media(max-width:600px){.context-export-header{padding:20px;align-items:flex-start}.context-export-header>.caption{display:none}.context-export{padding:28px 16px 40px}.context-export-intro h1{font-size:30px}.context-export-card{padding:20px 16px}.context-export-card .form-footer>.caption{flex-basis:100%}.context-export-card .form-footer .button{flex:1 1 auto;justify-content:center}}

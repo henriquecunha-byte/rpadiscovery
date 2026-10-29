@@ -35,8 +35,12 @@
         if (!value.guiaEditado) value.guia = model.compileGuide(value);
     }
     function change() {
+        const invalid = validationOrder.filter(name => $(name)?.getAttribute('aria-invalid') === 'true');
         reconcile();
         render();
+        // A solution can also select a stage and its checklist. Clear stale
+        // errors on those derived fields, without validating untouched fields.
+        invalid.forEach(validateField);
         notify();
     }
     function setValue(context) {

@@ -67,6 +67,19 @@ async function check(name, work) {
         assert.equal(await page.locator('#suggestPrompt').isDisabled(), true);
         assert.equal(await page.locator('#nextStep').isEnabled(), true);
     });
+    await check('Automatic RPA stage and checklist clear their previous validation errors', async () => {
+        await fresh();
+        await page.locator('#nextStep').click();
+        assert.ok(await page.locator('#etapaDestinoError').innerText());
+        assert.ok(await page.locator('#entregaveisError').innerText());
+        await basic();
+        await page.locator(selector('solucoes', 'rpa')).check();
+        assert.equal(await page.locator('#etapaDestinoError').innerText(), '');
+        assert.equal(await page.locator('#entregaveisError').innerText(), '');
+        assert.equal(await page.locator('#etapaDestino [aria-invalid=true]').count(), 0);
+        assert.equal(await page.locator('#entregaveis [aria-invalid=true]').count(), 0);
+        assert.ok(await page.locator('#publicoError').innerText());
+    });
     await check('Continue validates and focuses first field, not on initial typing', async () => {
         await fresh();
         await page.locator('#cliente').focus();
